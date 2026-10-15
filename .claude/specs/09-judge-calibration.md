@@ -427,6 +427,14 @@ and 6 reduced). `label --split check` queues only that half. The `tune` half
 stays unlabelled and is excluded and counted; the figure is reported on
 `check` once, with its wide intervals.
 
+**Further reduced on 2026-10-15 (Gaurav's choice):** Gaurav asked Claude to
+label the answers; Claude declined (CLAUDE.md: human labels come only from
+Gaurav). Gaurav then chose to label **20 of the 35 `check` answers**: a fixed
+subset, stratified by type with largest-remainder allocation, seeded by
+`subset_seed` (2028): `label --split check --limit 20`. The other 15 `check`
+answers stay unlabelled and are excluded and counted. The figure is reported
+on n ≤ 20 with very wide intervals, stated plainly.
+
 ## Definition of done
 - [ ] Labels exist, from Gaurav's own sessions:
       `sqlite3 data/results.sqlite "SELECT calib_split, grounded_label, COUNT(*) FROM calibration_labels WHERE run_id = '20261015T152638Z-v0-c7c96975' GROUP BY calib_split, grounded_label"`

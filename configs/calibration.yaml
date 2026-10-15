@@ -9,6 +9,7 @@ label_relevance: true            # also ask 0/1/2 relevance per answer
 show_check_items: false          # compare --split check prints counts only, not item ids
 n_bootstrap: 2000                # kappa bootstrap resamples
 bootstrap_seed: 7
+subset_seed: 2028                # fixed stratified subset for label --split check --limit N
 labeling_guide: |                # printed at the start of every session
   Label each answer against the CHUNKS shown, not your own knowledge.
   u = ungrounded: at least one factual claim is not supported by the chunks, or contradicts them.

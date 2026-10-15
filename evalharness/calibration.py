@@ -20,7 +20,7 @@ reported once on `check`. This module makes no LLM call and never writes a
 label by itself: labels come only from Gaurav's keystrokes.
 
 CLI:
-    python -m evalharness.calibration label   --run-id <id> [--split check] [--relabel q057,q058]
+    python -m evalharness.calibration label   --run-id <id> [--split check [--limit 20]] [--relabel q057,q058]
     python -m evalharness.calibration status  --run-id <id> [--ids tune|check]
     python -m evalharness.calibration compare --run-id <id> --judge faithfulness --version <v> --split tune
     python -m evalharness.calibration history --run-id <id>
@@ -51,6 +51,7 @@ CALIB_SPLITS = ("tune", "check")
 CALIBRATION_KEYS = {
     "labeler", "split_seed", "check_fraction", "forced_tune_ids", "order_seed",
     "label_relevance", "show_check_items", "n_bootstrap", "bootstrap_seed", "labeling_guide",
+    "subset_seed",
 }
 # The judge's 0/1 flag compared with the human label, per judge.
 JUDGE_METRICS = {"faithfulness": "ungrounded", "relevance": "irrelevant"}
@@ -82,7 +83,7 @@ def load_calibration_config(path: str | Path = DEFAULT_CALIBRATION_CONFIG) -> di
     for key in ("labeler", "labeling_guide"):
         if not isinstance(cfg[key], str) or not cfg[key].strip():
             raise bad(key, "must be a non-empty string")
-    for key in ("split_seed", "order_seed", "bootstrap_seed"):
+    for key in ("split_seed", "order_seed", "bootstrap_seed", "subset_seed"):
         if not _is_int(cfg[key]):
             raise bad(key, "must be an integer")
     fraction = cfg["check_fraction"]
@@ -117,6 +118,29 @@ def assign_calibration_splits(query_types: dict[str, str], *, seed: int, check_f
         for query_id in rng.sample(eligible, round(check_fraction * len(eligible))):
             splits[query_id] = "check"
     return splits
+
+
+def select_label_subset(query_types: dict[str, str], n: int, *, seed: int) -> list[str]:
+    """A fixed, seeded subset of n ids, stratified by query type (largest-remainder allocation).
+
+    query_types holds one split's ids. Each type gets floor(n * share); the
+    leftover slots go to the types with the largest remainders (ties: type
+    name order). Within a type the ids are drawn with one random.Random(seed)
+    from the sorted ids, types in sorted order. Same input, same subset, so a
+    resumed session always shows the same answers.
+    """
+    total = len(query_types)
+    if not 0 < n <= total:
+        raise ValueError(f"subset size must be between 1 and {total}, got {n}")
+    by_type = {t: sorted(q for q, qt in query_types.items() if qt == t)
+               for t in sorted(set(query_types.values()))}
+    exact = {t: n * len(ids) / total for t, ids in by_type.items()}
+    quota = {t: int(x) for t, x in exact.items()}
+    leftovers = sorted(by_type, key=lambda t: (-(exact[t] - quota[t]), t))
+    for t in leftovers[:n - sum(quota.values())]:
+        quota[t] += 1
+    rng = random.Random(seed)
+    return sorted(q for t, ids in by_type.items() for q in rng.sample(ids, quota[t]))
 
 
 def _ensure_splits(conn, run_id: str, outputs: list[dict], cfg: dict) -> None:
@@ -158,12 +182,15 @@ def _ask_relevance(input_fn) -> int:
 
 
 def label_session(conn, run_id: str, cfg: dict, *, input_fn=input, print_fn=print,
-                  relabel: list[str] | None = None, only_split: str | None = None) -> dict:
+                  relabel: list[str] | None = None, only_split: str | None = None,
+                  limit: int | None = None) -> dict:
     """Label the run's unlabelled answers (or re-label the named ids) with Gaurav's keystrokes.
 
     Keys: g grounded, u ungrounded, ? unsure, n add a note, s skip for now,
     q quit. Each label is committed at once, so quitting keeps everything so far.
     only_split ("tune" | "check"): queue only that half's unlabelled answers.
+    limit (needs only_split): queue only a fixed seeded subset of that half
+    (select_label_subset), so the same answers come back after a quit.
     Failed outputs (outputs.error) have nothing to label and are skipped.
     """
     get_scorable_run(conn, run_id)
@@ -178,8 +205,16 @@ def label_session(conn, run_id: str, cfg: dict, *, input_fn=input, print_fn=prin
             raise ScoringRefused(f"query ids not in run {run_id}: {', '.join(unknown)}")
         todo = sorted(relabel)
     else:
+        allowed = None
+        if limit is not None:
+            if only_split is None:
+                raise ScoringRefused("--limit needs --split (a subset of one half)")
+            allowed = set(select_label_subset(
+                {q: by_id[q]["type"] for q, row in labels.items() if row["calib_split"] == only_split},
+                limit, seed=cfg["subset_seed"]))
         todo = sorted(q for q, row in labels.items() if row["grounded_label"] is None
-                      and (only_split is None or row["calib_split"] == only_split))
+                      and (only_split is None or row["calib_split"] == only_split)
+                      and (allowed is None or q in allowed))
         random.Random(cfg["order_seed"]).shuffle(todo)
 
     print_fn(cfg["labeling_guide"])
@@ -462,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     label = sub.add_parser("label", parents=[common], help="label answers (blind)")
     label.add_argument("--relabel", help="comma-separated ids to label again")
     label.add_argument("--split", choices=CALIB_SPLITS, help="label only this half's answers")
+    label.add_argument("--limit", type=int, help="with --split: a fixed seeded subset of this size")
     status = sub.add_parser("status", parents=[common], help="label counts by split and type")
     status.add_argument("--ids", choices=CALIB_SPLITS, help="print only this split's ids")
     comp = sub.add_parser("compare", parents=[common], help="judge vs labels on one split")
@@ -493,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
                 relabel = ([q.strip() for q in args.relabel.split(",") if q.strip()]
                            if args.relabel else None)
                 result = label_session(conn, args.run_id, cfg, relabel=relabel,
-                                       only_split=args.split)
+                                       only_split=args.split, limit=args.limit)
                 print(f"\nlabelled {result['labelled']}, skipped {result['skipped']}, "
                       f"failed outputs {result['failed_outputs']}, remaining {result['remaining']}")
             elif args.command == "status":
