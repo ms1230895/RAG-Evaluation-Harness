@@ -46,6 +46,11 @@ THE CONTRACT
 EVALUATION HARNESS (evalharness/)
   test set -> runner -> deterministic checks + LLM judges -> SQLite
            -> regression compare + flagging -> Streamlit dashboard
+
+SHARED LLM CLIENT (llm/)
+  llm/client.py: generate() with cache, retries, token + latency log.
+  Used by the generator in rag/ and the judges in evalharness/; it knows
+  nothing about RAG or evaluation, so rag/ still never imports evalharness/.
 ```
 
 The RAG pipeline must know nothing about evaluation. The harness must only call `answer()`, so it can later evaluate any other RAG system (for example my full HR chatbot) unchanged.
@@ -66,7 +71,7 @@ We build our own small, config-driven RAG pipeline (v0) so that every knob (chun
 | Vector search | faiss-cpu |
 | Keyword search (later experiment) | rank_bm25 |
 | Reranker (later experiment) | sentence-transformers CrossEncoder |
-| LLM calls | openai Python SDK pointed at Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`), using Ollama cloud models: generator `gpt-oss:120b-cloud`, judge `deepseek-v4.1-flash:cloud` |
+| LLM calls | openai Python SDK pointed at Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`), using Ollama cloud models: generator `gemma4:31b-cloud`, judge `gpt-oss:120b-cloud` (both in the Ollama Free plan) |
 | Structured judge output and test-set validation | pydantic |
 | Storage | sqlite3 (standard library) |
 | Analysis and statistics | pandas, numpy, scipy |
@@ -86,7 +91,7 @@ Do NOT use:
 - Each experiment is one YAML file in `configs/`. Change ONE variable per experiment and log it in `experiments/log.md`.
 - Generator temperature fixed and low; judge temperature 0.
 - The judge model must be different from (ideally stronger than) the generator model.
-- Cache every LLM call keyed by a hash of (model, prompt, temperature, schema), so re-runs are cheap and repeatable.
+- Cache every LLM call keyed by a hash of (model, prompt, temperature, schema), so re-runs are cheap and repeatable. Every LLM call goes through `llm/client.py`.
 - The 20 held-out queries are NEVER used for tuning. They are used once, in Step 12.
 - Report rates with 95% confidence intervals (Wilson interval).
 - Human labels for calibration and review must come from me, never from an LLM.
@@ -99,10 +104,12 @@ rag-eval/
     docs/               # HR corpus, one file per document, stable doc IDs
     test_set.jsonl
   configs/              # v0.yaml, v1_chunk256.yaml, ...
+  llm/
+    client.py           # shared cached LLM client (generator + judges)
   rag/
     chunker.py  embedder.py  index.py  retriever.py  pipeline.py
   evalharness/
-    llm.py  schemas.py  store.py  runner.py
+    schemas.py  store.py  runner.py
     checks.py  judges.py  metrics.py  calibration.py  regression.py  cli.py
   dashboard/app.py
   experiments/log.md
@@ -118,7 +125,7 @@ Done when: dependencies install cleanly and the first commit exists.
 **Step 1. Document corpus.** 15-25 HR documents (leave, payroll, onboarding, IT access, code of conduct, internship rules, etc.), cleaned to plain text or markdown with stable doc IDs. If synthetic, use a fictional company, include specific checkable facts (numbers, dates, eligibility rules), and include a few closely related policies so retrieval is not trivial.
 Done when: every doc loads, has an ID, and contains no garbage text.
 
-**Step 2. LLM wrapper (evalharness/llm.py).** `generate(prompt, model, temperature, schema=None)` with retries, disk/SQLite cache, and token + latency logging. Ask me which provider and models to use for the generator and the judge.
+**Step 2. LLM wrapper (llm/client.py).** `generate(prompt, model, temperature, schema=None)` with retries, disk/SQLite cache, and token + latency logging. Ask me which provider and models to use for the generator and the judge.
 Done when: an identical second call returns instantly from the cache.
 
 ### Phase B: System under test
@@ -178,3 +185,7 @@ Then ask me: do I have HR documents from my earlier chatbot project, or should y
 - **Step 1 (done, 2026-10-15):** Synthetic corpus of 22 HR policies (7,178 words) for the fictional "Kestrel Labs Pvt. Ltd." (Bengaluru + Pune offices, bands B1-B6, HR portal "KestrelHub"), in `data/docs/<doc_id>.md`; the filename is the stable doc ID and line 1 is `# Title`. Loader: `rag/loader.py` (`load_docs()`, `python -m rag.loader`). Tests: `tests/test_corpus.py` (size, unique safe IDs, title, >=150 words, no garbage markers/control chars/unexpected non-ASCII); 62 tests pass.
   - Deliberately confusable pairs: `leave_policy` vs `intern_leave_policy` (employees 8 CL/yr vs interns 1 CL per completed month); `expense_reimbursement_policy` vs `travel_policy`; `attendance_and_working_hours` vs `remote_hybrid_work_policy`; `it_access_policy` vs `device_and_byod_policy` vs `information_security_policy`; `probation_and_confirmation` vs `resignation_and_exit_policy` (notice periods).
   - Deliberate gaps (never mentioned anywhere, use for unanswerable queries in Step 4): ESOPs/stock options, gym or wellness membership, pet policy, sabbatical, relocation allowance, office shuttle/transport, office canteen/meals (`travel_policy` covers meals only inside the travel per diem).
+- **Step 2 (done, 2026-10-15):** Shared LLM client `llm/client.py` (neutral package so both `rag/` and `evalharness/` can use it; `rag/` still never imports `evalharness/`). `generate(prompt, model, temperature, schema=None) -> LLMResult` calls Ollama's OpenAI-compatible endpoint (`.env`: `LLM_BASE_URL`, dummy `LLM_API_KEY`) via the openai SDK with SDK retries off; tenacity retries only transient errors (settings in `configs/llm.yaml`); SQLite cache `data/llm_cache.sqlite` (gitignored) keyed by SHA-256 of (model, prompt, temperature, JSON Schema); every call logged in `llm_calls`. Structured replies validated with pydantic; invalid or empty replies raise `LLMOutputError` and are never cached. Tests: `tests/test_02_llm_wrapper.py` (45, all offline), plus `tests/conftest.py`.
+  - Models changed: `deepseek-v4.1-flash:cloud` returned `402 Payment Required` (not in Ollama Free plan). Now generator `gemma4:31b-cloud`, judge `gpt-oss:120b-cloud` (judge is the larger model).
+  - `gpt-oss:120b-cloud` accepts `response_format` json_schema but still wraps JSON in a ```json fence, so the server does not enforce the schema; `_parse` strips one surrounding fence before pydantic validation.
+  - Done-when check (rows from `llm_calls`): plain call `gpt-oss:120b-cloud` miss 73 prompt / 146 completion tokens, 7081.0 ms; identical second call cache hit, 1.9 ms, same text. Structured `Claims` call miss 99 / 185 tokens, 1118.5 ms; hit 2.2 ms. Note: 146 completion tokens for a 3-word reply, because gpt-oss counts its hidden reasoning tokens.

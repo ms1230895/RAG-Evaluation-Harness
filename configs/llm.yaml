@@ -1,0 +1,10 @@
+# Connection, retry and cache settings for llm/client.py.
+# Model names and temperatures are NOT here: each caller passes its own
+# (generator from the pipeline config, judge from the judge config).
+# These are starting defaults, not tuned values.
+
+timeout_s: 120          # max seconds to wait for one API response (thinking models can be slow)
+max_attempts: 5         # total tries per call, including the first
+retry_wait_min_s: 2     # first backoff wait; doubles after each failed try
+retry_wait_max_s: 30    # cap on a single backoff wait
+cache_path: data/llm_cache.sqlite   # relative to the repo root; gitignored by *.sqlite
