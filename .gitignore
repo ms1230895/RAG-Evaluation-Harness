@@ -27,5 +27,5 @@ indexes/
 .vscode/
 .DS_Store
 
-# Claude Code commands copied from another project
-.claude/
+# Claude Code personal settings (agents, commands, skills are committed)
+.claude/settings.local.json
