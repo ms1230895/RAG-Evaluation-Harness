@@ -40,3 +40,9 @@ checks:
     - "cannot answer"
     - "can't answer"
     - "unable to answer"
+
+# Baseline / run report (Step 10). Values approved by Gaurav on 2026-10-16.
+report:
+  primary_metric: ungrounded        # the headline rate (CLAUDE.md); the only supported value
+  include_bad_answer_rate: true     # also report ungrounded OR irrelevant
+  allow_incomplete: false           # refuse when any judge has failed / missing items
