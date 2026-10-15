@@ -1,0 +1,27 @@
+# Step 12 pre-registration. Written 2026-10-16, before any held-out run.
+# Do not edit after the first held-out run except to add a dated, explained entry
+# under `amendments`. evalharness/heldout.py enforces this file.
+selection_rule: >
+  Lowest ungrounded rate among Step 11 dev runs whose bad-answer rate and
+  false-refusal count are not worse than baseline, noise control excluded
+  (fixed before the Step 11 results).
+baseline_config: configs/v0.yaml
+chosen_config: configs/v1_prompt_citations.yaml
+allowed_configs:
+  - configs/v0.yaml
+  - configs/v1_prompt_citations.yaml
+config_sha256:                       # sha256 of each file's bytes (shasum -a 256)
+  configs/v0.yaml: 47c3955a26fea7aafc663e936b8c5501d8edae86bb2703ab0442d0b055f2de89
+  configs/v1_prompt_citations.yaml: fa04b3e056bc990b6b0aaa828c42fba2b751abc38be205de143546b19f6aaff0
+max_runs_per_config: 1               # every held-out row in `runs` counts, whatever its status
+pinned_versions:                     # the scorers used on dev; a changed judge refuses the run
+  checks: checks-1-66c5a50a
+  faithfulness: faith-v2-d130a39f
+  relevance: rel-v2-c825e4f7
+dev_runs:                            # stored dev runs shown beside the held-out numbers
+  baseline: 20261015T152638Z-v0-c7c96975
+  chosen: 20261015T220912Z-v1_prompt_citations-23b6da7c
+significance_level: 0.05             # exact paired p below this = supported better / worse
+output:
+  markdown_path: experiments/heldout_confirmation.md
+amendments: []

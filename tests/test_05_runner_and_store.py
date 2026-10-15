@@ -1282,6 +1282,19 @@ class MainEnv:
         self.pipeline_path = tmp_path / "fake_pipeline.yaml"
         self.pipeline_path.write_text(yaml.safe_dump({"name": "fakecfg", "top_k": 3}), encoding="utf-8")
         (tmp_path / "test_set_test.yaml").write_text(yaml.safe_dump(testset_config), encoding="utf-8")
+        # Step 12: the held-out guard fails closed, so a held-out run needs a pre-registration.
+        self.heldout_path = tmp_path / "heldout_test.yaml"
+        self.heldout_path.write_text(yaml.safe_dump({
+            "selection_rule": "test rule",
+            "baseline_config": str(self.pipeline_path), "chosen_config": str(self.pipeline_path),
+            "allowed_configs": [str(self.pipeline_path)],
+            "config_sha256": {str(self.pipeline_path):
+                              hashlib.sha256(self.pipeline_path.read_bytes()).hexdigest()},
+            "max_runs_per_config": 1,
+            "pinned_versions": {"checks": "c", "faithfulness": "f", "relevance": "r"},
+            "dev_runs": {"baseline": "dev-a", "chosen": "dev-b"},
+            "significance_level": 0.05, "output": {"markdown_path": "out.md"}, "amendments": [],
+        }), encoding="utf-8")
         self.write_harness()
 
     def write_harness(self, answer="fake_answer", describe="fake_describe",
@@ -1293,6 +1306,7 @@ class MainEnv:
             "test_set_config": str(self.tmp_path / "test_set_test.yaml"),
             "max_consecutive_failures": max_consecutive_failures,
             "error_max_chars": error_max_chars,
+            "heldout_config": str(self.heldout_path),
             "system": {
                 "answer": prefix + answer,
                 "load_config": prefix + "fake_load_config",
@@ -1330,6 +1344,9 @@ def main_env(tmp_path, testset_config, ready_queries, llm_config, monkeypatch):
     monkeypatch.setattr(runner, "git_info", lambda: ("a" * 40, False))
     monkeypatch.setattr(runner, "load_llm_config", lambda *args, **kwargs: llm_config)
     fake_describe_flips.calls = 0
+    # The fake harness has no checks / judges blocks, so the "current" scorer versions are faked.
+    monkeypatch.setattr(runner.heldout, "current_scorer_versions",
+                        lambda harness: {"checks": "c", "faithfulness": "f", "relevance": "r"})
     return MainEnv(tmp_path, testset_config, llm_config)
 
 

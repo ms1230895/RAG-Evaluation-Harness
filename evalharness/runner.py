@@ -41,7 +41,7 @@ from typing import Callable
 import yaml
 from tqdm import tqdm
 
-from evalharness import store
+from evalharness import heldout, store
 from evalharness.schemas import SPLITS, Query
 from evalharness.testset import (check_ready, filter_split, load_test_set, load_testset_config,
                                  resolve_path)
@@ -332,6 +332,9 @@ def main(argv: list[str] | None = None) -> int:
         return refuse("test set is not ready: " + "; ".join(problems))
     if args.split == "heldout" and not args.allow_heldout:
         return refuse("the held-out split is used once, in Step 12; pass --allow-heldout only then")
+    if args.split == "heldout" and args.allow_dirty:
+        return refuse("--allow-dirty is not allowed on the held-out split: the commit must be "
+                      "the code that runs")
     git_commit, git_dirty = git_info()
     if git_dirty and not args.allow_dirty:
         return refuse("uncommitted changes: commit first so git_commit is the code that runs "
@@ -341,6 +344,17 @@ def main(argv: list[str] | None = None) -> int:
         config = system.load_config(args.config)
     except ValueError as error:
         return refuse(str(error))
+    if args.split == "heldout":
+        # Step 12 guard: registered configs only, pinned bytes, once each. Fails closed:
+        # no valid pre-registration file means no held-out run.
+        try:
+            heldout_cfg = heldout.load_heldout_config(harness)
+            with closing(store.connect(harness["db_path"])) as guard_conn:
+                info = heldout.check_heldout_allowed(guard_conn, args.config, heldout_cfg, harness)
+        except (heldout.HeldoutRefused, ValueError) as error:
+            return refuse(str(error))
+        print(f"held-out guard: {args.config} allowed "
+              f"(runs used {info['used']} of {info['max']})")
     try:
         system_info = system.describe(config) if system.describe is not None else {}
     except Exception as error:
