@@ -1,0 +1,29 @@
+# Pinned to the exact versions installed on Python 3.13 (Step 0).
+# torch and transformers come in automatically via sentence-transformers.
+
+# Embeddings, reranker (sentence-transformers), vector + keyword search
+sentence-transformers==6.1.0
+faiss-cpu==1.15.1
+rank-bm25==0.2.2
+
+# LLM calls (OpenAI-compatible endpoint) and structured outputs
+openai==3.31.0
+pydantic==2.14.1
+
+# Analysis and statistics
+pandas==3.0.6
+numpy==2.5.4
+scipy==1.18.1
+
+# Dashboard
+streamlit==1.66.0
+plotly==7.1.0
+
+# Configs, retries, progress bars, secrets
+PyYAML==6.0.3
+tenacity==9.2.1
+tqdm==4.70.1
+python-dotenv==1.2.4
+
+# Tests
+pytest==9.1.1

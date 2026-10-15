@@ -1,0 +1,31 @@
+# Secrets
+.env
+
+# Virtual environment
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# SQLite database (runs, outputs, scores, LLM cache)
+*.db
+*.sqlite
+*.sqlite3
+
+# FAISS index files
+*.faiss
+*.index
+indexes/
+
+# Hugging Face / model caches if stored locally
+.cache/
+
+# Editor and OS files
+.vscode/
+.DS_Store
+
+# Claude Code commands copied from another project
+.claude/
