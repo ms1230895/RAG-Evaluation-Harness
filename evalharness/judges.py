@@ -1,4 +1,4 @@
-"""LLM judges for stored runs (Step 7: faithfulness).
+"""LLM judges for stored runs (Step 7: faithfulness; Step 8: relevance).
 
 The faithfulness judge asks: is every claim in the answer supported by the
 chunks the generator actually saw? For each stored output it makes two cached
@@ -17,11 +17,21 @@ one `judge_claims` row per claim, under a judge version like
 "faith-v1-3fa1c27e". A failed output, a blank answer or a judge failure is
 stored as value NULL with the reason, never as grounded or ungrounded.
 
-The judge is NOT calibrated until Step 9: its ungrounded rate is the judge's
-opinion, and every report says so.
+The relevance judge (Step 8) asks: does the answer address the question? One
+cached call sees the question, the answer and one line from the test set
+saying whether the HR policies can answer it (source_doc_ids == [] means
+not). It never sees the chunks or the reference answer. It returns a 0 / 1 / 2
+rubric score; rows per output: relevance (score / 2) and irrelevant
+(score <= irrelevant_max_score). A correct refusal on an unanswerable query
+scores 2; a refusal on an answerable one, or an invented answer to an
+unanswerable one, scores 0.
+
+The judges are NOT calibrated (faithfulness until Step 9): their rates are the
+judge's opinion, and every report says so.
 
 CLI:
     python -m evalharness.judges faithfulness --run-id 20261015T152638Z-v0-c7c96975 [--query-ids q001,q053]
+    python -m evalharness.judges relevance    --run-id 20261015T152638Z-v0-c7c96975
 Exit codes: 0 complete; 1 refused (bad config, digest mismatch, run not
 scorable); 2 partial (--query-ids) or aborted.
 """
@@ -46,12 +56,14 @@ from evalharness.checks import ANSWERABLE_TYPES, ScoringRefused, get_scorable_ru
 from evalharness.metrics import mean_summary, rate_summary
 from evalharness.runner import (DEFAULT_HARNESS_CONFIG, _format_calls, llm_calls_max_id,
                                 llm_calls_summary, load_harness_config)
-from evalharness.schemas import QUERY_TYPES, ClaimList, ClaimVerdict, ClaimVerdicts
+from evalharness.schemas import (QUERY_TYPES, ClaimList, ClaimVerdict, ClaimVerdicts,
+                                 RelevanceVerdict)
 from evalharness.testset import resolve_path
 from llm.client import LLMOutputError, generate, get_model_digest
 from llm.client import load_config as load_llm_config
 
 FAITHFULNESS_METRICS = ("faithfulness", "ungrounded", "n_claims")
+RELEVANCE_METRICS = ("relevance", "irrelevant")
 REASONING_EFFORTS = ("low", "medium", "high")   # gpt-oss thinking levels (ollama show)
 
 # Every key of the `faithfulness` block in configs/judges.yaml.
@@ -67,6 +79,14 @@ TEMPLATE_FIELDS = {
     "context_chunk_template": {"rank", "text"},
 }
 
+# Keys every judge block has (call settings and identity).
+COMMON_KEYS = {"prompt_version", "model", "model_digest", "temperature", "seed",
+               "reasoning_effort", "max_prompt_tokens", "max_consecutive_failures"}
+# Every key of the `relevance` block, and its template's exact placeholders.
+RELEVANCE_KEYS = COMMON_KEYS | {"irrelevant_max_score", "answerable_text", "unanswerable_text",
+                                "prompt_template"}
+RELEVANCE_TEMPLATE_FIELDS = {"prompt_template": {"question", "answer", "answerability"}}
+
 # Reasoning prefixes of NULL rows; the report counts items by them.
 NOT_JUDGED = "not judged: "
 JUDGE_FAILED = "judge failed: "
@@ -78,6 +98,15 @@ class JudgeError(Exception):
 
 class ModelDigestError(Exception):
     """The judge's pinned model_digest differs from what the server reports."""
+
+
+@dataclass
+class RelevanceJudgement:
+    """The relevance judge's result for one answer."""
+    score: int            # 0 / 1 / 2 from the rubric
+    relevance: float      # score / 2
+    irrelevant: int       # 1 if score <= irrelevant_max_score
+    reasoning: str        # the judge's own reasoning
 
 
 @dataclass
@@ -175,6 +204,27 @@ def load_judges_config(path: str | Path) -> dict:
         raise bad("threshold", "must be a number in (0, 1]")
     _check_templates(block, TEMPLATE_FIELDS, bad)
     return {**block, "version": _version("faith", block, [ClaimList, ClaimVerdicts])}
+
+
+def load_relevance_config(path: str | Path) -> dict:
+    """Read configs/judges.yaml, check the `relevance` block, return it with its "version".
+
+    version = "rel-v<prompt_version>-<first 8 hex of sha256(every other setting
+    + the RelevanceVerdict schema)>". ValueError names the problem.
+    """
+    block, path = _load_block(path, "relevance", RELEVANCE_KEYS)
+
+    def bad(key: str, rule: str) -> ValueError:
+        return ValueError(f"{path}: 'relevance.{key}' {rule}")
+
+    _check_common(block, bad)
+    if not _is_int(block["irrelevant_max_score"]) or block["irrelevant_max_score"] not in (0, 1):
+        raise bad("irrelevant_max_score", "must be 0 or 1 (rubric scores are 0 / 1 / 2)")
+    for key in ("answerable_text", "unanswerable_text"):
+        if not isinstance(block[key], str) or not block[key].strip():
+            raise bad(key, "must be a non-empty string")
+    _check_templates(block, RELEVANCE_TEMPLATE_FIELDS, bad)
+    return {**block, "version": _version("rel", block, [RelevanceVerdict])}
 
 
 # ---------------------------------------------------------------- prompts and calls
@@ -408,7 +458,77 @@ def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
                         max_consecutive_failures=cfg["max_consecutive_failures"])
 
 
+# ---------------------------------------------------------------- relevance (Step 8)
+
+def answerability_text(source_doc_ids: list[str], cfg: dict) -> str:
+    """The answerability line for the prompt, from the test set: no source docs = not answerable."""
+    return cfg["answerable_text"] if source_doc_ids else cfg["unanswerable_text"]
+
+
+def judge_relevance_output(output: dict, cfg: dict) -> RelevanceJudgement:
+    """One call: the rubric score for one stored output. Raises JudgeError on any failure.
+
+    The judge sees the question, the answer and the answerability line only:
+    never the chunks (relevance is not groundedness) and never the reference
+    answer (relevance is not correctness).
+    """
+    prompt = cfg["prompt_template"].format(
+        question=output["question"], answer=output["answer"],
+        answerability=answerability_text(output["source_doc_ids"], cfg))
+    verdict = _call(prompt, RelevanceVerdict, cfg)
+    return RelevanceJudgement(score=verdict.score, relevance=verdict.score / 2,
+                              irrelevant=int(verdict.score <= cfg["irrelevant_max_score"]),
+                              reasoning=verdict.reasoning)
+
+
+def _relevance_rows(judgement: RelevanceJudgement, cfg: dict) -> list[dict]:
+    """The 2 score rows for a successful relevance judgement."""
+    limit = cfg["irrelevant_max_score"]
+    comparison = "<=" if judgement.score <= limit else ">"
+    return [
+        {"metric": "relevance", "value": judgement.relevance,
+         "reasoning": f"score {judgement.score}/2: {judgement.reasoning}"},
+        {"metric": "irrelevant", "value": float(judgement.irrelevant),
+         "reasoning": f"score {judgement.score} {comparison} {limit}"},
+    ]
+
+
+def relevance_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
+                  retry_failed: bool = False, query_ids: list[str] | None = None,
+                  error_max_chars: int = 500) -> dict:
+    """Judge relevance for every output of a completed run not yet judged under this version.
+
+    Rows per output: relevance, irrelevant (no claim rows). Same resume, retry,
+    query_ids and failure handling as faithfulness (see _judge_items).
+    """
+    get_scorable_run(conn, run_id, allow_heldout=allow_heldout)
+    outputs = store.get_outputs_with_queries(conn, run_id)
+
+    def judge_one(output: dict) -> tuple[list[dict], list[dict]]:
+        return _relevance_rows(judge_relevance_output(output, cfg), cfg), []
+
+    return _judge_items(conn, run_id, cfg["version"], outputs, judge_one, RELEVANCE_METRICS,
+                        retry_failed=retry_failed, query_ids=query_ids,
+                        error_max_chars=error_max_chars,
+                        max_consecutive_failures=cfg["max_consecutive_failures"])
+
+
 # ---------------------------------------------------------------- report
+
+GROUP_TYPES = {"all": QUERY_TYPES, "answerable": ANSWERABLE_TYPES,
+               **{t: (t,) for t in QUERY_TYPES}}
+
+
+def _coverage_state(row: dict | None) -> str:
+    """"judged", "judge_failed", "not_judged" or "missing", from an item's first score row."""
+    if row is None:
+        return "missing"
+    if row["reasoning"].startswith(JUDGE_FAILED):
+        return "judge_failed"
+    if row["reasoning"].startswith(NOT_JUDGED):
+        return "not_judged"
+    return "judged"
+
 
 def build_faithfulness_report(conn, run_id: str, version: str, confidence: float) -> dict:
     """Summaries read back from `scores` and `judge_claims` only, by group.
@@ -424,23 +544,14 @@ def build_faithfulness_report(conn, run_id: str, version: str, confidence: float
         labels.setdefault(row["query_id"], Counter())[row["label"]] += 1
 
     def state(query_id: str) -> str:
-        row = scores.get(query_id, {}).get("faithfulness")
-        if row is None:
-            return "missing"
-        if row["reasoning"].startswith(JUDGE_FAILED):
-            return "judge_failed"
-        if row["reasoning"].startswith(NOT_JUDGED):
-            return "not_judged"
-        return "judged"
+        return _coverage_state(scores.get(query_id, {}).get("faithfulness"))
 
     def value(query_id: str, metric: str):
         row = scores.get(query_id, {}).get(metric)
         return row["value"] if row is not None else None
 
-    group_types = {"all": QUERY_TYPES, "answerable": ANSWERABLE_TYPES,
-                   **{t: (t,) for t in QUERY_TYPES}}
     groups = {}
-    for name, types in group_types.items():
+    for name, types in GROUP_TYPES.items():
         ids = [o["query_id"] for o in outputs if o["type"] in types]
         states = Counter(state(q) for q in ids)
         label_totals = sum((labels.get(q, Counter()) for q in ids), Counter())
@@ -516,21 +627,120 @@ def format_faithfulness_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+def build_relevance_report(conn, run_id: str, version: str, confidence: float) -> dict:
+    """Relevance summaries read back from `scores` only, by group (all, answerable, each type)."""
+    outputs = store.get_outputs_with_queries(conn, run_id)
+    scores: dict[str, dict[str, dict]] = {}
+    for row in store.get_scores(conn, run_id, version):
+        scores.setdefault(row["query_id"], {})[row["metric"]] = row
+
+    def state(query_id: str) -> str:
+        return _coverage_state(scores.get(query_id, {}).get("relevance"))
+
+    def value(query_id: str, metric: str):
+        row = scores.get(query_id, {}).get(metric)
+        return row["value"] if row is not None else None
+
+    def raw_score(query_id: str) -> int | None:
+        relevance = value(query_id, "relevance")
+        return None if relevance is None else round(relevance * 2)
+
+    groups = {}
+    for name, types in GROUP_TYPES.items():
+        ids = [o["query_id"] for o in outputs if o["type"] in types]
+        states = Counter(state(q) for q in ids)
+        score_counts = Counter(raw_score(q) for q in ids)
+        groups[name] = {
+            "outputs": len(ids),
+            **{key: states[key] for key in ("judged", "judge_failed", "not_judged", "missing")},
+            "score_counts": {score: score_counts[score] for score in (0, 1, 2)},
+            "relevance": mean_summary([value(q, "relevance") for q in ids]),
+            "irrelevant": rate_summary([value(q, "irrelevant") for q in ids], confidence),
+        }
+
+    return {
+        "run_id": run_id, "version": version, "confidence": confidence, "groups": groups,
+        "irrelevant_ids": [o["query_id"] for o in outputs if value(o["query_id"], "irrelevant") == 1],
+        "unanswerable_not_2_ids": [o["query_id"] for o in outputs if o["type"] == "unanswerable"
+                                   and state(o["query_id"]) == "judged"
+                                   and raw_score(o["query_id"]) != 2],
+        "judge_failed_ids": [o["query_id"] for o in outputs if state(o["query_id"]) == "judge_failed"],
+        "not_judged_ids": [o["query_id"] for o in outputs if state(o["query_id"]) == "not_judged"],
+    }
+
+
+def format_relevance_report(report: dict) -> str:
+    """Plain-text relevance report; every rate shows successes/n and its Wilson interval."""
+    g = report["groups"]
+    pct = round(report["confidence"] * 100)
+    names = ["all", "answerable", *QUERY_TYPES]
+    lines = [
+        f"Run {report['run_id']}  judge version {report['version']}",
+        "",
+        f"{'group':<14}{'outputs':>8}{'judged':>8}{'judge failed':>14}{'not judged':>12}"
+        f"{'missing':>9}",
+    ]
+    for name in names:
+        x = g[name]
+        lines.append(f"{name:<14}{x['outputs']:>8}{x['judged']:>8}{x['judge_failed']:>14}"
+                     f"{x['not_judged']:>12}{x['missing']:>9}")
+    lines.extend(["", "Rubric scores (0 = does not address / 1 = partly / 2 = addresses; "
+                      "unanswerable: 2 = clean refusal)"])
+    for name in names:
+        c = g[name]["score_counts"]
+        lines.append(f"  {name:<14}0: {c[0]:>3}   1: {c[1]:>3}   2: {c[2]:>3}")
+    lines.extend(["", "Mean relevance (score / 2)"])
+    for name in names:
+        s = g[name]["relevance"]
+        mean = "-" if s["mean"] is None else f"{s['mean']:.3f}"
+        lines.append(f"  {name:<14}{mean}  n={s['n']}")
+    lines.extend(["", f"Irrelevant rate (uncalibrated judge; rate  irrelevant/judged  "
+                      f"[{pct}% Wilson CI])"])
+    for name in names:
+        lines.append(f"  {name:<14}{_fmt_rate(g[name]['irrelevant'])}")
+    lines.extend([
+        "",
+        f"Irrelevant:                    {_fmt_list(report['irrelevant_ids'])}",
+        f"Unanswerable, not scored 2:    {_fmt_list(report['unanswerable_not_2_ids'])}",
+        f"Judge failed:                  {_fmt_list(report['judge_failed_ids'])}",
+        f"Not judged:                    {_fmt_list(report['not_judged_ids'])}",
+        "",
+        "Note: the relevance judge is not calibrated. Per-type n is small (12-16 on dev);",
+        "differences inside the CIs are not meaningful.",
+    ])
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- CLI
+
+# Each judge as (config loader, run function, report builder, report formatter).
+JUDGES = {
+    "faithfulness": (load_judges_config, judge_run, build_faithfulness_report,
+                     format_faithfulness_report),
+    "relevance": (load_relevance_config, relevance_run, build_relevance_report,
+                  format_relevance_report),
+}
+
+
+def _add_run_args(parser: argparse.ArgumentParser) -> None:
+    """The flags every judge subcommand takes."""
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--query-ids", help="comma-separated ids to judge only those (smoke test)")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="judge again the items stored as 'judge failed'")
+    parser.add_argument("--allow-heldout", action="store_true",
+                        help="allow judging a held-out run (Step 12 only)")
+    parser.add_argument("--harness-config", default=DEFAULT_HARNESS_CONFIG)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m evalharness.judges",
                                      description="Judge a stored run with an LLM judge.")
     sub = parser.add_subparsers(dest="judge", required=True)
-    faith = sub.add_parser("faithfulness", help="claim-level faithfulness judge (Step 7)")
-    faith.add_argument("--run-id", required=True)
-    faith.add_argument("--query-ids", help="comma-separated ids to judge only those (smoke test)")
-    faith.add_argument("--retry-failed", action="store_true",
-                       help="judge again the items stored as 'judge failed'")
-    faith.add_argument("--allow-heldout", action="store_true",
-                       help="allow judging a held-out run (Step 12 only)")
-    faith.add_argument("--harness-config", default=DEFAULT_HARNESS_CONFIG)
+    _add_run_args(sub.add_parser("faithfulness", help="claim-level faithfulness judge (Step 7)"))
+    _add_run_args(sub.add_parser("relevance", help="rubric relevance judge (Step 8)"))
     args = parser.parse_args(argv)
+    load_config, run_judge, build_report, format_report = JUDGES[args.judge]
     # Per-call INFO lines from llm.client would bury the progress bar; warnings still show.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
@@ -542,7 +752,7 @@ def main(argv: list[str] | None = None) -> int:
         harness = load_harness_config(args.harness_config)
         if not isinstance(harness.get("judges_config"), str):
             raise ValueError(f"{args.harness_config}: missing key 'judges_config'")
-        cfg = load_judges_config(harness["judges_config"])
+        cfg = load_config(harness["judges_config"])
         confidence = load_checks_config(harness)["report_confidence"]
     except ValueError as error:
         return refuse(str(error))
@@ -569,19 +779,19 @@ def main(argv: list[str] | None = None) -> int:
                 return refuse(f"judge model {cfg['model']} is the run's generator model; "
                               "the judge must be a different model (CLAUDE.md)")
             start_id = llm_calls_max_id(llm_config)
-            result = judge_run(conn, args.run_id, cfg, allow_heldout=args.allow_heldout,
+            result = run_judge(conn, args.run_id, cfg, allow_heldout=args.allow_heldout,
                                retry_failed=args.retry_failed, query_ids=query_ids,
                                error_max_chars=harness["error_max_chars"])
         except ScoringRefused as error:
             return refuse(str(error))
         calls = llm_calls_summary(llm_config, start_id, llm_calls_max_id(llm_config))
-        report = build_faithfulness_report(conn, args.run_id, cfg["version"], confidence)
+        report = build_report(conn, args.run_id, cfg["version"], confidence)
 
     print(f"judged run {args.run_id} with {cfg['version']}: {result['status']} | "
           f"{result['n_outputs']} outputs: {result['judged']} judged, "
           f"{result['judge_failed']} judge failed, {result['not_judged']} not judged, "
           f"{result['skipped_existing']} skipped (already judged) | {_format_calls(calls)}\n")
-    print(format_faithfulness_report(report))
+    print(format_report(report))
     return 0 if result["status"] == "complete" else 2
 
 
