@@ -529,7 +529,7 @@ libomp note below). Two `test_03` disk-load assertions now expect exactly
 one warm-up query embedding and still no chunk re-embedding.
 
 ## Carry-forward to later steps
-- **macOS libomp clash (Step 11, and any torch use):** faiss-cpu and torch
+- **macOS libomp clash (Step 11, and any torch use) [resolved in Step 11: the cross-encoder runs in a child process, `rag/rerank_worker.py`]:** faiss-cpu and torch
   each bundle `libomp.dylib`; they cannot run in one process here (checked
   2026-10-15 in every order: `OMP: Error #15` or a silent crash). The test
   suite avoids it by not importing `sentence_transformers` in-process. The
