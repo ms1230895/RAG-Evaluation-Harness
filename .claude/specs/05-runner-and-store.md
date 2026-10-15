@@ -180,7 +180,7 @@ def check_contract(out) -> None:
     score: int/float, not bool) and latency_ms (int/float, not bool, >= 0)."""
 def git_info() -> tuple[str, bool]:      # (HEAD commit hash, working tree dirty?)
 def file_sha256(path: str | Path) -> str
-def make_run_id(config_name: str) -> str:  # "20261015T151200Z-v0-3fa1" (UTC + name + 4 random hex)
+def make_run_id(config_name: str) -> str:  # "20261015T151200Z-v0-3fa1c27e" (UTC + name + 8 random hex)
 def llm_calls_max_id(llm_config: dict) -> int   # 0 if the table is empty or missing
 def llm_calls_summary(llm_config: dict, after_id: int, upto_id: int) -> dict
     # {"gemma4:31b-cloud": {"calls": 80, "hits": 1, "misses": 79, "errors": 0}}
@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int
 ```
 CLI:
 ```
-python -m evalharness.runner --config configs/v0.yaml --split dev [--allow-dirty] [--allow-heldout]
+python -m evalharness.runner --config configs/v0.yaml --split dev [--allow-dirty] [--allow-heldout] [--harness-config configs/harness.yaml]
 ```
 Prints the run_id, a tqdm progress bar, then `run <id>: completed | 80 queries, 80 ok, 0 failed | gemma4:31b-cloud: 80 calls, 1 hit, 79 misses, 0 errors | db data/results.sqlite`.
 Exit codes: 0 completed, 1 refused before starting (not ready, held-out, dirty
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS queries (
 );
 
 CREATE TABLE IF NOT EXISTS runs (
-    run_id             TEXT PRIMARY KEY,       -- "20261015T151200Z-v0-3fa1"
+    run_id             TEXT PRIMARY KEY,       -- "20261015T151200Z-v0-3fa1c27e"
     timestamp          TEXT NOT NULL,          -- UTC ISO start
     git_commit         TEXT NOT NULL,
     config_json        TEXT NOT NULL,          -- json.dumps(config, sort_keys=True)

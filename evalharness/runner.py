@@ -174,9 +174,9 @@ def file_sha256(path: str | Path) -> str:
 
 
 def make_run_id(config_name: str) -> str:
-    """UTC start time + config name + 4 random hex, e.g. "20261015T151200Z-v0-3fa1"."""
+    """UTC start time + config name + 8 random hex, e.g. "20261015T151200Z-v0-3fa1c27e"."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-{config_name}-{secrets.token_hex(2)}"
+    return f"{stamp}-{config_name}-{secrets.token_hex(4)}"
 
 
 def _open_llm_log(llm_config: dict) -> sqlite3.Connection | None:
