@@ -34,6 +34,10 @@ Invoke the **rag-test-writer** subagent with:
   section. Do NOT derive expected values from the implementation.
   Never call a real LLM, never load the real embedding model, never touch
   the real database — use fakes and tmp_path.
+  Keep the suite SMALL and effective: target 25-50 tests (hard cap 70),
+  parametrize instead of copying, reuse fixtures from tests/conftest.py,
+  run the file once yourself to fix mistakes in your own tests, and keep
+  the report under 25 lines.
 
 Wait for rag-test-writer to finish and confirm the test file was written
 and collected by pytest before proceeding to Step 2.
@@ -50,7 +54,9 @@ Invoke the **rag-test-runner** subagent with:
   `dashboard/`, `configs/`
 - Run command: `python -m pytest TEST_FILE -v`
 - Instruction: Run ONLY this test file. Classify every failure as BUG,
-  MISSING, FAULTY TEST or SPEC UNCLEAR, with its root cause.
+  MISSING, FAULTY TEST or SPEC UNCLEAR, with its root cause. Keep the
+  report short: counts, then one line per failure (test, class, cause,
+  file:line); no per-test listing of passing tests.
 
 ---
 

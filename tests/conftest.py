@@ -1182,3 +1182,149 @@ def baseline_db(tmp_path, make_query):
                               sha=BASELINE_SHA, commit=BASELINE_COMMIT, set_score=set_score,
                               add_faith_version=add_faith_version,
                               add_calibration_report=add_calibration_report)
+
+
+# ---------------------------------------------------------------- Step 11: experiments
+
+# Same tuple layout as _BASELINE_CASES: (id, type, source docs, in_context, hit@4,
+# reciprocal_rank, refusal, faithfulness, ungrounded, n_claims, relevance, irrelevant).
+# faithfulness None = the faithfulness judge failed for this item.
+_EXPERIMENT_CASES = [
+    ("q001", "lookup", ["leave_policy"], 1, 1, 1.0, 0, 1.0, 0, 3, 1.0, 0),
+    ("q002", "lookup", ["payroll_policy"], 1, 1, 0.5, 0, 1.0, 0, 4, 1.0, 0),
+    ("q003", "lookup", ["it_policy"], 1, 1, 1.0, 0, 1.0, 0, 5, 1.0, 0),
+    ("q004", "lookup", ["leave_policy"], 0, 0, 0.0, 1, 1.0, 0, 0, 0.0, 1),
+    ("q005", "multi_chunk", ["leave_policy", "payroll_policy"], 1, 1, 1.0, 0, 0.5, 1, 2, 1.0, 0),
+    ("q006", "multi_chunk", ["it_policy", "leave_policy"], 1, 1, 0.25, 0, 1.0, 0, 4, 1.0, 0),
+    ("q007", "paraphrased", ["payroll_policy"], 1, 1, 0.5, 0, 1.0, 0, 2, 1.0, 0),
+    ("q008", "paraphrased", ["it_policy"], 1, 1, 1.0, 0, 1.0, 0, 2, 1.0, 0),
+    ("q009", "unanswerable", [], None, None, None, 1, 1.0, 0, 0, 1.0, 0),
+    ("q010", "unanswerable", [], None, None, None, 1, None, None, None, 1.0, 0),
+]
+
+
+def _write_scored_run(conn, run_id, cases, versions, *, split="dev", sha=BASELINE_SHA,
+                      status="completed", scorers=("checks", "faithfulness", "relevance"),
+                      config=None, system_info=None, latency=None):
+    """Insert one run, its outputs and the chosen scorings (same row shapes as `baseline_db`)."""
+    from evalharness import store
+
+    store.start_run(conn, run_id=run_id, split=split, config=config or {"name": run_id},
+                    config_path=f"configs/{run_id}.yaml", git_commit=BASELINE_COMMIT,
+                    git_dirty=True, test_set_sha256=sha, system_info=system_info or {},
+                    n_queries=len(cases), llm_calls_start_id=0)
+    chunks = [{"chunk_id": "leave_policy#000", "doc_id": "leave_policy",
+               "text": "Some chunk text.", "score": 0.5}]
+    checks_rows, faith_rows, rel_rows = [], [], []
+    na = "not applicable: no source documents"
+    for (qid, _t, _s, in_ctx, hit4, rr, refusal, faith, ungr, n_claims, rel, irrel) in cases:
+        store.write_output(conn, run_id=run_id, query_id=qid, answer=f"Answer {run_id} {qid}.",
+                           chunks=chunks, latency_ms=10.0, error=None)
+        checks_rows += [
+            {"query_id": qid, "metric": "empty_answer", "value": 0.0, "reasoning": "not empty"},
+            {"query_id": qid, "metric": "refusal", "value": float(refusal), "reasoning": "hand"},
+            {"query_id": qid, "metric": "in_context",
+             "value": None if in_ctx is None else float(in_ctx),
+             "reasoning": na if in_ctx is None else "hand"},
+            {"query_id": qid, "metric": "hit@4",
+             "value": None if hit4 is None else float(hit4),
+             "reasoning": na if hit4 is None else "hand"},
+            {"query_id": qid, "metric": "reciprocal_rank", "value": rr,
+             "reasoning": na if rr is None else "hand"},
+        ]
+        if latency is not None:
+            checks_rows.append({"query_id": qid, "metric": "latency_ms",
+                                "value": latency[qid], "reasoning": "hand"})
+        if faith is None:
+            failed = "judge failed: LLMOutputError: bad json from judge"
+            faith_rows += [{"query_id": qid, "metric": m, "value": None, "reasoning": failed}
+                           for m in ("faithfulness", "ungrounded", "n_claims")]
+        else:
+            faith_rows += [
+                {"query_id": qid, "metric": "faithfulness", "value": faith,
+                 "reasoning": f"faith reasoning {run_id} {qid}"},
+                {"query_id": qid, "metric": "ungrounded", "value": float(ungr),
+                 "reasoning": f"ungrounded reasoning {run_id} {qid}"},
+                {"query_id": qid, "metric": "n_claims", "value": float(n_claims),
+                 "reasoning": "hand"},
+            ]
+        rel_rows += [
+            {"query_id": qid, "metric": "relevance", "value": rel, "reasoning": "hand"},
+            {"query_id": qid, "metric": "irrelevant", "value": float(irrel), "reasoning": "hand"},
+        ]
+    if status != "running":
+        store.finish_run(conn, run_id, status=status, n_ok=len(cases), n_failed=0,
+                         llm_calls_summary={})
+    for scorer, rows in (("checks", checks_rows), ("faithfulness", faith_rows),
+                         ("relevance", rel_rows)):
+        if scorer in scorers:
+            store.write_scores(conn, run_id, versions[scorer], rows)
+
+
+@pytest.fixture
+def experiment_db(baseline_db):
+    """`baseline_db` plus a second, hand-made experiment run "run-exp-001" (dev, completed).
+
+    Namespace = the baseline_db namespace plus `.exp_run_id`, `.exp_cases`,
+    `.add_run(run_id, *, cases=None, split="dev", sha=None, status="completed", scorers=all three)`
+    (another run scored with the baseline's three versions; `cases` defaults to the experiment
+    cases), `.add_simple_run(run_id, ungrounded_ids, split="dev")` (all 10 queries judged, the
+    given ids ungrounded, nothing failed) and `.set_exp_score(version, query_id, metric, value)`.
+
+    Hand values, baseline (run-baseline-001) vs experiment (run-exp-001), 10 queries:
+      id    baseline ungr   experiment ungr   pair
+      q001  0               0                 both_grounded
+      q002  1               0                 improved
+      q003  1               0                 improved   (faith 0.6 -> 1.0)
+      q004  0               0                 both_grounded (false refusal in both)
+      q005  0               1                 regressed  (faith 1.0 -> 0.5)
+      q006  1               0                 improved   (faith 0.75 -> 1.0)
+      q007  0               0                 both_grounded
+      q008  judge failed    0                 not_paired
+      q009  0               0                 both_grounded
+      q010  1               judge failed      not_paired
+    Flips: improved 3, regressed 1, both_grounded 4, both_ungrounded 0, not_paired 2.
+    McNemar: n = 4 flips, k = 3, P(X >= 3) = 5/16, p = 0.625.
+    Ungrounded: baseline 4/9 (answerable 3/7), experiment 1/9 (answerable 1/8).
+    Mean faithfulness difference over the 8 pairs with both sides judged (q008, q010 excluded):
+    (0 + 0.5 + 0.4 + 0 - 0.5 + 0.25 + 0 + 0) / 8 = 0.65 / 8 = 0.08125.
+    Experiment config_json differs from the baseline's only in generation.seed (and its
+    `experiment` block); experiment latencies are 100, 200, ..., 1000 ms (p50 550, p95 955).
+    """
+    from types import SimpleNamespace
+
+    exp_run_id = "run-exp-001"
+    versions = baseline_db.versions
+    conn = baseline_db.conn
+    config = {"name": "exp_fake",
+              "experiment": {"base": "configs/v0.yaml", "variable": "generation.seed (fixture)",
+                             "changed_keys": ["generation.seed"],
+                             "hypothesis": "HYPOTHESIS-FIXTURE-TEXT"},
+              "generation": {"seed": 43}}
+    latency = {case[0]: 100.0 * number for number, case in enumerate(_EXPERIMENT_CASES, start=1)}
+    _write_scored_run(conn, exp_run_id, _EXPERIMENT_CASES, versions, config=config,
+                      system_info={"index": {"index_key": "INDEX-KEY-FIXTURE"}}, latency=latency)
+
+    def add_run(run_id, *, cases=None, split="dev", sha=None, status="completed",
+                scorers=("checks", "faithfulness", "relevance")):
+        _write_scored_run(conn, run_id, cases or _EXPERIMENT_CASES, versions, split=split,
+                          sha=sha or BASELINE_SHA, status=status, scorers=scorers)
+
+    def add_simple_run(run_id, ungrounded_ids, split="dev"):
+        cases = []
+        for case in _BASELINE_CASES:
+            bad = case[0] in set(ungrounded_ids)
+            cases.append((case[0], case[1], case[2], case[3], case[4], case[5], 0,
+                          0.5 if bad else 1.0, 1 if bad else 0, 2, 1.0, 0))
+        _write_scored_run(conn, run_id, cases, versions, split=split)
+
+    def set_exp_score(version, query_id, metric, value):
+        with conn:
+            conn.execute("UPDATE scores SET value = ? WHERE run_id = ? AND version = ?"
+                         " AND query_id = ? AND metric = ?",
+                         (value, exp_run_id, version, query_id, metric))
+
+    fields = dict(vars(baseline_db))
+    fields.update(exp_run_id=exp_run_id, exp_cases=list(_EXPERIMENT_CASES), add_run=add_run,
+                  add_simple_run=add_simple_run, set_exp_score=set_exp_score)
+    return SimpleNamespace(**fields)

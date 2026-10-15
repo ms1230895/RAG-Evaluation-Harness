@@ -232,14 +232,18 @@ def mcnemar_exact(improved: int, regressed: int) -> float | None
     mcnemar_exact(4, 1) == 0.375; mcnemar_exact(6, 0) == 0.03125."""
 
 def paired_bootstrap_ci(diffs: list[float], n_boot: int, seed: int, confidence: float) -> dict
-    """{"mean", "lo", "hi", "n"}; seeded numpy resampling; None when n == 0."""
+    """{"n", "mean", "ci_low", "ci_high"}; seeded numpy resampling. With no
+    differences, n is 0 and mean, ci_low and ci_high are None (same naming as
+    Step 6 rate_summary)."""
 
 def compare_runs(conn, base_run_id: str, exp_run_id: str, versions: dict, cfg: dict,
                  *, allow_heldout: bool = False) -> dict
-    """One experiment row. Refuses (ExperimentRefused) unless: both runs
-    completed; same split; same test_set_sha256; both have rows for all three
-    scorer versions; neither is held-out (unless allow_heldout); the runs
-    differ. Contains: both ungrounded rates (all, answerable, with Wilson CI),
+    """One experiment row. Raises ExperimentRefused when the runs are the
+    same, or differ in split, test_set_sha256 or query ids; raises
+    ScoringRefused (from get_scorable_run / item_table, shared with Steps 6-10)
+    when a run is not completed, is held-out without allow_heldout, or lacks
+    rows for one of the three scorer versions. `cfg` holds n_bootstrap,
+    bootstrap_seed and confidence. Contains: both ungrounded rates (all, answerable, with Wilson CI),
     delta in points, flip counts and lists (with the judge reasoning of each
     flipped answer), McNemar p, mean-faithfulness difference with bootstrap
     CI, bad-answer rate, false refusals, correct refusals on unanswerable,
