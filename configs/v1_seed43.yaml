@@ -1,0 +1,81 @@
+# Step 11 experiment v1_seed43: configs/v0.yaml with ONE variable changed (see the
+# `experiment:` block at the end). The hypothesis was written before the run.
+name: v1_seed43
+
+corpus:
+  docs_dir: data/docs                 # relative to the repo root
+
+chunking:
+  chunk_size: 150                     # words per chunk
+  chunk_overlap: 30                   # words shared with the previous chunk
+
+embedding:
+  model: nomic-embed-text             # local Ollama model, 768-dim, max 2048 tokens per input
+  doc_prefix: "search_document: "     # nomic's documented passage prefix
+  query_prefix: "search_query: "      # nomic's documented question prefix
+  batch_size: 32                      # texts per embeddings request
+  max_input_words: 1000               # chunk_size must not exceed this: nomic reads at most 2048 tokens and Ollama truncates silently
+
+index:
+  dir: indexes                        # relative to the repo root; gitignored; one file pair per index_key
+
+# Step 11 added the bm25 / hybrid / rerank / query_rewrite keys below. They are
+# OFF or unused here (method vector, rerank and rewrite disabled), so v0 behaves
+# exactly as before; each experiment config switches on ONE of them.
+retrieval:
+  method: vector                      # vector | bm25 | hybrid
+  top_k: 4                            # chunks put into the prompt
+  bm25:                               # used by method bm25 and hybrid; rank_bm25's defaults
+    k1: 1.5                           # how fast repeated terms stop adding score
+    b: 0.75                           # length normalisation, 0 = none, 1 = full
+  hybrid:                             # used only when method is hybrid
+    fusion: rrf                       # reciprocal rank fusion, the only supported value
+    rrf_k: 60                         # RRF constant, 1 / (rrf_k + rank); 60 is the original paper's value
+    pool_k: 10                        # candidates taken from each of vector and BM25 before fusing
+  rerank:                             # cross-encoder reranker, runs in a child process
+    enabled: false
+    pool_k: 10                        # first-stage candidates handed to the cross-encoder; top_k are kept
+    model: cross-encoder/ms-marco-MiniLM-L-6-v2
+    revision: 233902d25c440f23af6f7d6e94d2946bac0bee0a   # Hugging Face commit of the model, read from the downloaded snapshot (refs/main, 2026-10-16)
+    worker_timeout_s: 60              # max seconds to wait for one reranking reply
+
+query_rewrite:
+  enabled: false
+  prompt_template: |                  # must contain {question}; other braces must be doubled
+    Rewrite the question below as a short search query for a company HR
+    policy knowledge base. Keep every number, name and abbreviation. Reply with
+    the query only.
+
+    Question: {question}
+
+generation:
+  model: gemma4:31b-cloud
+  # Ollama /api/tags digest of the model build (part of the cache key);
+  # describe_system() refuses a run if the server reports a different one.
+  model_digest: ef09f235533c96cd75e8deed88c628335cb69e2b3ce96275d0d7a67fe9887aba
+  temperature: 0.0                    # fixed and low (CLAUDE.md); 0 keeps sampling noise out of comparisons
+  seed: 43                            # sent to the API, part of the cache key
+  reasoning_effort: null              # null = not sent; gemma4 thinking defaults to off
+  # A conservative guard, NOT gemma4's real limit (262144 tokens): the /v1
+  # endpoint cannot set num_ctx, so we stay below Ollama's common 4096 default.
+  # answer() raises ContextLimitError at or above this, or when the server
+  # reports no prompt_tokens. Larger Step 11 configs may hit it; those
+  # failures must be counted, not dropped.
+  max_prompt_tokens: 3500
+  context_separator: "\n\n---\n\n"    # between chunks in the prompt
+  context_chunk_template: "{text}"    # one chunk in the prompt; {rank} is 1-based; "{text}" = the v0 prompt
+  prompt_template: |                  # must contain {context} and {question}
+    Use the following context to answer the question.
+
+    Context:
+    {context}
+
+    Question: {question}
+
+    Answer:
+
+experiment:
+  base: configs/v0.yaml
+  variable: "generation.seed 42 -> 43 (noise control)"
+  changed_keys: [generation.seed]
+  hypothesis: "Nothing real changes; only sampling noise can differ. Expect the ungrounded count within 2 of the baseline 7 and 0 to 3 flips in either direction. This run sets the noise floor for reading every other experiment."
