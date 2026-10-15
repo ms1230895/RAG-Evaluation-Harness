@@ -1,0 +1,21 @@
+# Judge calibration (Step 9). Values approved by Gaurav on 2026-10-15.
+labeler: gaurav
+split_seed: 2027                 # random.Random seed for the tune/check split; used once
+check_fraction: 0.5              # share of each query type's eligible ids that go to check
+# Ids whose judge verdicts were shown in chat before labelling (possible anchoring):
+forced_tune_ids: [q001, q029, q053, q057, q058, q068, q069, q071, q082, q085, q097]
+order_seed: 11                   # shuffled labelling order
+label_relevance: true            # also ask 0/1/2 relevance per answer
+show_check_items: false          # compare --split check prints counts only, not item ids
+n_bootstrap: 2000                # kappa bootstrap resamples
+bootstrap_seed: 7
+subset_seed: 2028                # fixed stratified subset for label --split check --limit N
+labeling_guide: |                # printed at the start of every session
+  Label each answer against the CHUNKS shown, not your own knowledge.
+  u = ungrounded: at least one factual claim is not supported by the chunks, or contradicts them.
+  g = grounded: every factual claim is supported. A pure refusal ("not mentioned") and
+      statements about the documents themselves count as grounded.
+  ? = unsure: you cannot decide; it is left out of the metrics and counted.
+  Relevance (if asked): 2 = addresses everything asked (or, for a question the policies
+  do not cover, clearly says so); 1 = partly; 0 = does not address it (including a
+  refusal of a question the policies do cover).
