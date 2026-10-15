@@ -165,7 +165,7 @@ def format_baseline_report(report: dict) -> str          # terminal text
 def format_baseline_markdown(report: dict) -> str        # experiments/baseline_v0.md
 def log_row(report: dict, config_path: str, note: str) -> str
     """One experiments/log.md table row: date, config, "— (baseline)", run_id,
-    "8.7% [4.3%, 17.0%] (7/80, uncalibrated judge)" style text, note."""
+    "8.75% [4.30%, 16.98%] (7/80), uncalibrated judge" style text, note."""
 
 def main(argv: list[str] | None = None) -> int
 ```
@@ -357,6 +357,12 @@ All resolved on 2026-10-16; Gaurav accepted every recommendation:
 4. ~~Which run.~~ **Option A:** reuse `20261015T152638Z-v0-c7c96975`.
 5. ~~Where the report lives.~~ **Option A:** printed, `run_reports`,
    `experiments/baseline_v0.md`, row 1 of `experiments/log.md`.
+
+Clarified after the test run (Gaurav, 2026-10-16): percentages use 2 decimals
+(k/80 is exact, so 7/80 prints 8.75%, never a float tie at 1 decimal); table
+rates use 4 decimals; the markdown group table gives k and n in separate
+cells; "uncalibrated judge" is on the headline line and on every judge-based
+section heading (per section, not on every table row).
 
 Implementation note: `report.py` imports `evalharness.judges` (for the
 version loaders and `_coverage_state`), which itself imports `llm.client`.
