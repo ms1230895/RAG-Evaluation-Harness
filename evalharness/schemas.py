@@ -4,6 +4,7 @@ Step 4: `Query`, one line of data/test_set.jsonl.
 Step 7: the faithfulness judge's reply schemas, `ClaimList` (call 1) and
 `ClaimVerdicts` (call 2). llm/client.py validates every judge reply against
 them, so a malformed verdict raises and is never cached or scored.
+Step 8: the relevance judge's reply schema, `RelevanceVerdict`.
 
 The models are strict on purpose: bad data should fail loudly when the
 test set is loaded, not quietly skew a metric later.
@@ -125,3 +126,25 @@ class ClaimVerdicts(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     verdicts: list[ClaimVerdict]
+
+
+# ---------------------------------------------------------------- relevance reply (Step 8)
+
+class RelevanceVerdict(BaseModel):
+    """Relevance judge reply: a rubric score of 0 / 1 / 2.
+
+    Reasoning comes before the score (explain first, then decide). No default
+    score: a reply without one is invalid. strict=True rejects "2" for 2.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reasoning: str
+    score: Literal[0, 1, 2]
+
+    @field_validator("reasoning")
+    @classmethod
+    def reasoning_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reasoning must not be blank")
+        return value.strip()
