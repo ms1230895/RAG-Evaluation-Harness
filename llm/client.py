@@ -24,6 +24,10 @@ embed(texts, model) returns embedding vectors from the same endpoint, with the
 same retry loop. It is not cached here (the pipeline saves its document
 vectors in a FAISS index file) and not logged to llm_calls.
 
+get_model_digest(model) asks Ollama's native /api/tags endpoint which build
+(digest) a model tag points to, so a run can record model identity and the
+cache key can change when a model is re-pulled.
+
 Two latencies are kept apart on purpose:
 - model_latency_ms: time of the one successful HTTP request, i.e. real model
   time. Stored in the cache, so a cache hit reports the original model time.
@@ -48,6 +52,7 @@ import logging
 import os
 import sqlite3
 import time
+import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -537,6 +542,30 @@ def embed(texts: list[str], model: str, *, config: dict | None = None) -> list[l
         raise LLMOutputError(f"{model} returned {len(data)} embeddings for {len(texts)} texts")
     logger.info("embed model=%s texts=%d latency_ms=%.1f", model, len(texts), _elapsed_ms(start))
     return [item.embedding for item in data]
+
+
+def get_model_digest(model: str, *, config: dict | None = None) -> str | None:
+    """Digest Ollama reports for `model` on its native /api/tags endpoint.
+
+    The endpoint is base_url with the trailing /v1 removed (the OpenAI-
+    compatible API has no digest). Returns None if the tag is not listed.
+    Connection errors are raised: a run must not start against an unreachable
+    server. Not retried, cached or logged: it is one cheap local request.
+
+    Limitation: for "-cloud" models the digest identifies the local manifest,
+    not the remote weights, so a provider-side model update would not change it.
+    """
+    if config is None:
+        config = load_config()
+    host = config["base_url"].rstrip("/").removesuffix("/v1")
+    with urllib.request.urlopen(f"{host}/api/tags", timeout=config["timeout_s"]) as response:
+        tags = json.load(response)
+    # A tag without a version ("nomic-embed-text") is listed as "...:latest".
+    names = {model} if ":" in model else {model, f"{model}:latest"}
+    for entry in tags.get("models", []):
+        if entry.get("name") in names:
+            return entry.get("digest")
+    return None
 
 
 # ---------------------------------------------------------------- CLI demo

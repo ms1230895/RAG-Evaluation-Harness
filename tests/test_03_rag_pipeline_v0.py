@@ -1288,11 +1288,12 @@ class TestConfig:
         assert config["index"]["dir"] == "indexes"
 
     def test_v0_config_has_review_added_values(self):
-        """Spec Config changes: configs/v0.yaml has embedding.max_input_words: 1000 and generation.model_digest: null."""
+        """Spec Config changes: configs/v0.yaml has embedding.max_input_words: 1000 and a
+        generation.model_digest (null in Step 3; Step 5 pins the 64-hex Ollama digest)."""
         config = load_pipeline_config(PROJECT_ROOT / "configs" / "v0.yaml")
         assert config["embedding"]["max_input_words"] == 1000
-        assert "model_digest" in config["generation"], "model_digest must be present (as null)"
-        assert config["generation"]["model_digest"] is None
+        assert "model_digest" in config["generation"], "model_digest must be present"
+        assert re.fullmatch(r"[0-9a-f]{64}", config["generation"]["model_digest"])
 
     def test_required_config_keys_include_review_additions(self):
         """Spec Config changes: max_input_words and model_digest are required keys (may be null for model_digest)."""
