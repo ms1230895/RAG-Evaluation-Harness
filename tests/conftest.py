@@ -284,3 +284,99 @@ def ready_queries(make_query):
                    source_doc_ids=[]),
     ]
     return [Query.model_validate(row) for row in rows]
+
+
+# ---------------------------------------------------------------- Step 5: runner and store
+
+class ScriptedAnswer:
+    """Fake `answer(question, config)` for the runner: valid contract dicts, or scripted failures.
+
+    By default every question gets a valid contract dict built from the question text.
+    `script(question, outcome)` replaces that for one question: a dict is returned
+    as it is, an exception (instance) is raised. `fail_all(exc)` makes every call raise.
+    `.calls` records {"question", "config"} for every call, in call order.
+    """
+
+    def __init__(self):
+        """Start with no script and no recorded calls."""
+        self.calls = []
+        self._outcomes = {}
+        self._fail_all = None
+
+    @staticmethod
+    def valid_output(question):
+        """A contract-valid answer() result whose fields all depend on the question."""
+        return {
+            "answer": f"Answer to: {question}",
+            "chunks": [{"chunk_id": "leave_policy#000", "doc_id": "leave_policy",
+                        "text": f"Chunk text for: {question}", "score": 0.9}],
+            "latency_ms": 12.5,
+        }
+
+    def script(self, question, outcome):
+        """For this question return `outcome` (dict) or raise it (exception instance)."""
+        self._outcomes[question] = outcome
+
+    def fail_all(self, error):
+        """Make every call raise `error`."""
+        self._fail_all = error
+
+    def __call__(self, question, config):
+        """Record the call, then return or raise the scripted outcome."""
+        self.calls.append({"question": question, "config": config})
+        if self._fail_all is not None:
+            raise self._fail_all
+        outcome = self._outcomes.get(question, None)
+        if outcome is None:
+            return self.valid_output(question)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class FakeDescribe:
+    """Fake `describe(config)` hook: returns `.result` and records the configs it was given."""
+
+    def __init__(self):
+        """Default result: a small dict with an index key and a model digest."""
+        self.result = {"index": {"index_key": "key-1"}, "generator_model": "fake-gen",
+                       "generator_model_digest": "digest-1"}
+        self.calls = []
+
+    def __call__(self, config):
+        """Record the call and return a copy of `.result`."""
+        self.calls.append(config)
+        return dict(self.result)
+
+
+@pytest.fixture
+def fake_system():
+    """A runner.System with a ScriptedAnswer, a load_config that echoes the path, and a FakeDescribe.
+
+    Use `fake_system.answer.script(...)` / `.fail_all(...)` / `.calls` and
+    `fake_system.describe.result` / `.calls`.
+    """
+    from evalharness.runner import System
+
+    return System(
+        answer=ScriptedAnswer(),
+        load_config=lambda path: {"name": "fake", "path": str(path)},
+        describe=FakeDescribe(),
+    )
+
+
+@pytest.fixture
+def results_db_path(tmp_path):
+    """Path of a throwaway results database in tmp_path (never data/results.sqlite)."""
+    return tmp_path / "results_test.sqlite"
+
+
+@pytest.fixture
+def results_db(results_db_path):
+    """An open evalharness.store connection to a fresh throwaway results DB; closed after the test."""
+    from contextlib import closing
+
+    from evalharness import store
+
+    with closing(store.connect(results_db_path)) as conn:
+        yield conn

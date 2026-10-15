@@ -1,0 +1,14 @@
+# Settings for the evaluation harness runner (Step 5).
+# Values approved by Gaurav on 2026-10-15; they are starting defaults, not tuned values.
+db_path: data/results.sqlite          # relative to the repo root; gitignored by *.sqlite
+test_set_config: configs/test_set.yaml
+max_consecutive_failures: 5           # stop the run as 'aborted' after this many failures in a row
+error_max_chars: 500                  # error text stored per failed item is cut to this length
+
+# The system under test, as "module:function". The harness imports these by
+# name, so evalharness/ never imports rag/ and another RAG system can be
+# evaluated by editing this block.
+system:
+  answer: rag.pipeline:answer                   # the contract: answer(question, config) -> dict
+  load_config: rag.pipeline:load_pipeline_config  # reads and checks the --config YAML
+  describe: rag.pipeline:describe_system        # optional run metadata; null = none

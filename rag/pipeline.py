@@ -16,6 +16,11 @@ call). The wall-clock LLMResult.latency_ms is never used: on a cache hit it is
 a few ms and would make the pipeline look far faster than it is. Building the
 index is one-off setup and is not counted.
 
+describe_system(config) is a second, optional function next to the
+contract: it returns facts a run must record that the config alone does not
+pin down (index key and corpus meta, model digests), and refuses a run whose
+pinned generator digest no longer matches the server. answer() is unchanged.
+
 rag/ knows nothing about evaluation: it never imports the harness package.
 
 Quick check from the command line:
@@ -29,8 +34,8 @@ from pathlib import Path
 
 import yaml
 
-from llm.client import generate
-from rag.index import get_index
+from llm.client import generate, get_model_digest
+from rag.index import describe_index, get_index
 from rag.retriever import retrieve
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,12 @@ class ContextLimitError(Exception):
     """The generator's prompt_tokens reached generation.max_prompt_tokens, or the
     server did not report prompt_tokens at all, so a silently truncated prompt
     cannot be ruled out. The answer must not be scored."""
+
+
+class ModelDigestError(Exception):
+    """generation.model_digest is null, or differs from the digest the server
+    reports for the generator model, so cached answers could belong to another
+    model build."""
 
 
 # ---------------------------------------------------------------- config
@@ -185,6 +196,33 @@ def answer(question: str, config: dict) -> dict:
         "answer": result.text,
         "chunks": top_chunks,
         "latency_ms": retrieval_ms + result.model_latency_ms,
+    }
+
+
+# ---------------------------------------------------------------- run metadata
+
+def describe_system(config: dict) -> dict:
+    """Facts about this pipeline for run metadata that config_json alone does not pin down.
+
+    Returns {"index": describe_index(config), "generator_model",
+    "generator_model_digest", "embedding_model", "embedding_model_digest"}.
+    Raises ModelDigestError if generation.model_digest is null or not equal to
+    the digest Ollama reports now (the pinned digest is part of the LLM cache
+    key, so a stale one would mix answers from two model builds). The
+    embedding digest is recorded only: index_key does not cover it.
+    """
+    gen, emb = config["generation"], config["embedding"]
+    live = get_model_digest(gen["model"])
+    if gen["model_digest"] is None or live is None or gen["model_digest"] != live:
+        raise ModelDigestError(
+            f"generation.model_digest is {gen['model_digest']!r} but the server reports "
+            f"{live!r} for {gen['model']}; update the pipeline config if the model was re-pulled")
+    return {
+        "index": describe_index(config),
+        "generator_model": gen["model"],
+        "generator_model_digest": live,
+        "embedding_model": emb["model"],
+        "embedding_model_digest": get_model_digest(emb["model"]),
     }
 
 

@@ -26,7 +26,9 @@ retrieval:
 
 generation:
   model: gemma4:31b-cloud
-  model_digest: null                  # model build identity; null in v0, Step 5 fills it (part of the cache key)
+  # Ollama /api/tags digest of the model build (part of the cache key);
+  # describe_system() refuses a run if the server reports a different one.
+  model_digest: ef09f235533c96cd75e8deed88c628335cb69e2b3ce96275d0d7a67fe9887aba
   temperature: 0.0                    # fixed and low (CLAUDE.md); 0 keeps sampling noise out of comparisons
   seed: 42                            # sent to the API, part of the cache key
   reasoning_effort: null              # null = not sent; gemma4 thinking defaults to off
