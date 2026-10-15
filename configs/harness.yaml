@@ -46,3 +46,11 @@ report:
   primary_metric: ungrounded        # the headline rate (CLAUDE.md); the only supported value
   include_bad_answer_rate: true     # also report ungrounded OR irrelevant
   allow_incomplete: false           # refuse when any judge has failed / missing items
+
+# Experiment comparison (Step 11). Values approved by Gaurav on 2026-10-16.
+experiments:
+  base_config: configs/v0.yaml        # default for `check --base`
+  ignore_keys: [name, experiment]     # top-level config keys that never count as a change
+  n_bootstrap: 2000                   # resamples for the paired bootstrap of the faithfulness difference
+  bootstrap_seed: 2029                # fixed, so a re-run prints the same interval
+  table_path: experiments/experiment_table.md

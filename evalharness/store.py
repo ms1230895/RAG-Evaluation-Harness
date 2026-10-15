@@ -144,7 +144,7 @@ SCHEMA = (
     CREATE TABLE IF NOT EXISTS run_reports (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id        TEXT NOT NULL REFERENCES runs(run_id),
-        kind          TEXT NOT NULL,           -- "baseline" (Step 10)
+        kind          TEXT NOT NULL,           -- "baseline" (Step 10), "experiment" (Step 11)
         versions_json TEXT NOT NULL,           -- {"checks", "faithfulness", "relevance"}
         report_json   TEXT NOT NULL,
         created_at    TEXT NOT NULL
