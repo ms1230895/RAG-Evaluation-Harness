@@ -192,12 +192,11 @@ def score_output(output: dict, query: dict, checks_config: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- scoring a run
 
-def score_run(conn, run_id: str, checks_config: dict, *, allow_heldout: bool = False) -> str:
-    """Score every output of a completed run; return "written" or "unchanged".
+def get_scorable_run(conn, run_id: str, *, allow_heldout: bool = False) -> dict:
+    """The runs row, if this run may be scored; else raise ScoringRefused.
 
-    Rows are written in one transaction. If rows for this version already
-    exist they must equal the new ones (scored_at aside), otherwise the scoring
-    changed without a version change and we refuse instead of overwriting.
+    Shared by the checks and the LLM judges: the run must exist, be
+    'completed', and not be held-out unless allow_heldout (Step 12 only).
     """
     run = store.get_run(conn, run_id)
     if run is None:
@@ -208,6 +207,17 @@ def score_run(conn, run_id: str, checks_config: dict, *, allow_heldout: bool = F
     if run["split"] == "heldout" and not allow_heldout:
         raise ScoringRefused("run is on the held-out split, which is used once, in Step 12; "
                              "pass --allow-heldout only then")
+    return run
+
+
+def score_run(conn, run_id: str, checks_config: dict, *, allow_heldout: bool = False) -> str:
+    """Score every output of a completed run; return "written" or "unchanged".
+
+    Rows are written in one transaction. If rows for this version already
+    exist they must equal the new ones (scored_at aside), otherwise the scoring
+    changed without a version change and we refuse instead of overwriting.
+    """
+    get_scorable_run(conn, run_id, allow_heldout=allow_heldout)
 
     version = checks_config["version"]
     rows = []

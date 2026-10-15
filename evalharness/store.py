@@ -9,6 +9,8 @@ on 2026-10-15 (marked (+) in .claude/specs/05-runner-and-store.md):
            `version` names the scorer ("checks-1-<hash>", later judge versions),
            so several versions for one run can be stored side by side.
 - reviews: human review per (run, query); first written in Steps 13/15.
+- judge_claims: per-claim verdicts of the faithfulness judge (Step 7), one row
+           per (run, query, version, claim), so a score can be traced to its claims.
 
 Every value goes in through `?` placeholders, never pasted into SQL text.
 Foreign keys are only enforced by SQLite when PRAGMA foreign_keys = ON is set
@@ -95,6 +97,17 @@ SCHEMA = (
         notes        TEXT,
         PRIMARY KEY (run_id, query_id)
     )""",
+    """
+    CREATE TABLE IF NOT EXISTS judge_claims (
+        run_id      TEXT NOT NULL REFERENCES runs(run_id),
+        query_id    TEXT NOT NULL REFERENCES queries(id),
+        version     TEXT NOT NULL,                 -- same as scores.version
+        claim_index INTEGER NOT NULL,              -- 1-based
+        claim       TEXT NOT NULL,
+        label       TEXT NOT NULL CHECK (label IN ('supported', 'unsupported', 'contradicted')),
+        reasoning   TEXT NOT NULL,
+        PRIMARY KEY (run_id, query_id, version, claim_index)
+    )""",
 )
 
 
@@ -123,7 +136,7 @@ def _migrate_scores(conn: sqlite3.Connection) -> None:
 
 
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create all five tables if they do not exist yet (after migrating an old empty scores table)."""
+    """Create every table if it does not exist yet (after migrating an old empty scores table)."""
     with conn:
         _migrate_scores(conn)
         for statement in SCHEMA:
@@ -262,10 +275,10 @@ def get_outputs(conn: sqlite3.Connection, run_id: str) -> list[dict]:
 
 
 def get_outputs_with_queries(conn: sqlite3.Connection, run_id: str) -> list[dict]:
-    """get_outputs() rows plus the query's `type`, `split` and parsed `source_doc_ids`."""
+    """get_outputs() rows plus the query's `question`, `type`, `split` and parsed `source_doc_ids`."""
     rows = conn.execute(
         "SELECT o.run_id, o.query_id, o.answer, o.retrieved_chunks_json, o.latency_ms, o.error,"
-        " q.type, q.split, q.source_doc_ids"
+        " q.question, q.type, q.split, q.source_doc_ids"
         " FROM outputs o JOIN queries q ON q.id = o.query_id"
         " WHERE o.run_id = ? ORDER BY o.query_id", (run_id,)).fetchall()
     outputs = []
@@ -298,4 +311,48 @@ def get_scores(conn: sqlite3.Connection, run_id: str, version: str) -> list[dict
     rows = conn.execute(
         "SELECT run_id, query_id, metric, version, value, reasoning, scored_at FROM scores"
         " WHERE run_id = ? AND version = ? ORDER BY query_id, metric", (run_id, version)).fetchall()
+    return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------- judge claims (Step 7)
+
+def write_judgement(conn: sqlite3.Connection, run_id: str, version: str, query_id: str,
+                    score_rows: list[dict], claim_rows: list[dict]) -> None:
+    """Store one output's judge scores and claim verdicts in one transaction.
+
+    score_rows: [{"metric", "value", "reasoning"}]; claim_rows:
+    [{"claim_index", "claim", "label", "reasoning"}]. All or nothing, so a
+    crash never leaves a score without its claims (or the other way round).
+    """
+    scored_at = _now()
+    with conn:
+        conn.executemany(
+            "INSERT INTO scores (run_id, query_id, metric, version, value, reasoning, scored_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(run_id, query_id, row["metric"], version, row["value"], row["reasoning"], scored_at)
+             for row in score_rows],
+        )
+        conn.executemany(
+            "INSERT INTO judge_claims (run_id, query_id, version, claim_index, claim, label,"
+            " reasoning) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(run_id, query_id, version, row["claim_index"], row["claim"], row["label"],
+              row["reasoning"]) for row in claim_rows],
+        )
+
+
+def delete_judgement(conn: sqlite3.Connection, run_id: str, version: str, query_id: str) -> None:
+    """Remove one output's judge scores and claims for one version (used by --retry-failed)."""
+    with conn:
+        conn.execute("DELETE FROM scores WHERE run_id = ? AND version = ? AND query_id = ?",
+                     (run_id, version, query_id))
+        conn.execute("DELETE FROM judge_claims WHERE run_id = ? AND version = ? AND query_id = ?",
+                     (run_id, version, query_id))
+
+
+def get_judge_claims(conn: sqlite3.Connection, run_id: str, version: str) -> list[dict]:
+    """A run's claim verdicts for one judge version, ordered by query_id, claim_index."""
+    rows = conn.execute(
+        "SELECT run_id, query_id, version, claim_index, claim, label, reasoning FROM judge_claims"
+        " WHERE run_id = ? AND version = ? ORDER BY query_id, claim_index",
+        (run_id, version)).fetchall()
     return [dict(row) for row in rows]
