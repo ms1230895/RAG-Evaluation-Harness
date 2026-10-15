@@ -212,10 +212,13 @@ def label_session(conn, run_id: str, cfg: dict, *, input_fn=input, print_fn=prin
             allowed = set(select_label_subset(
                 {q: by_id[q]["type"] for q, row in labels.items() if row["calib_split"] == only_split},
                 limit, seed=cfg["subset_seed"]))
-        todo = sorted(q for q, row in labels.items() if row["grounded_label"] is None
-                      and (only_split is None or row["calib_split"] == only_split)
-                      and (allowed is None or q in allowed))
-        random.Random(cfg["order_seed"]).shuffle(todo)
+        # Shuffle ALL of the run's ids once, then keep the ones still to label:
+        # a resumed session continues the same order instead of reshuffling the rest.
+        order = sorted(labels)
+        random.Random(cfg["order_seed"]).shuffle(order)
+        todo = [q for q in order if labels[q]["grounded_label"] is None
+                and (only_split is None or labels[q]["calib_split"] == only_split)
+                and (allowed is None or q in allowed)]
 
     print_fn(cfg["labeling_guide"])
     counts = {"labelled": 0, "skipped": 0, "failed_outputs": 0}
@@ -415,7 +418,7 @@ def format_compare(report: dict) -> str:
     positive = report["metric"]
     pct = round(report["confidence"] * 100)
     k, ci = report["kappa"], report["kappa_ci"]
-    kappa_text = "undefined" if k is None else f"{k:.3f}"
+    kappa_text = "undefined (0/0)" if k is None else f"{k:.3f}"
     ci_text = ("no interval (too many undefined resamples)" if ci["ci_low"] is None
                else f"[{ci['ci_low']:.3f}, {ci['ci_high']:.3f}]")
     lines = [

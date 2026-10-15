@@ -435,6 +435,13 @@ subset, stratified by type with largest-remainder allocation, seeded by
 answers stay unlabelled and are excluded and counted. The figure is reported
 on n ≤ 20 with very wide intervals, stated plainly.
 
+**Fixes from the test run (2026-10-16):** a resumed labelling session keeps
+the original seeded order: all of the run's ids are shuffled once with
+`order_seed`, then the labelled ones are dropped (previously the remainder was
+reshuffled). `format_compare` prints an undefined kappa as "undefined (0/0)",
+like precision and recall. Neither change touches stored labels or logged
+comparisons.
+
 ## Definition of done
 - [ ] Labels exist, from Gaurav's own sessions:
       `sqlite3 data/results.sqlite "SELECT calib_split, grounded_label, COUNT(*) FROM calibration_labels WHERE run_id = '20261015T152638Z-v0-c7c96975' GROUP BY calib_split, grounded_label"`

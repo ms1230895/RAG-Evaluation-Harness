@@ -870,3 +870,153 @@ def relevance_run_db(tmp_path, ready_queries):
                          llm_calls_summary={})
         yield SimpleNamespace(conn=conn, path=path, run_id=REL_RUN_ID, chunks=chunks,
                               answers=answers)
+
+
+# ---------------------------------------------------------------- Step 9: judge calibration
+
+CALIB_RUN_ID = "run-calib-001"
+CALIB_FAITH_A = "faith-test-A"
+CALIB_FAITH_B = "faith-test-B"
+CALIB_REL_A = "rel-test-A"
+
+# What each judge version stored as its 0/1 flag per query (None = judge failed, value NULL).
+# faith-test-A: q001 0, q002 1, q003 0, q004 1, q005 0, q006 1, q007 NULL, q008 1
+# faith-test-B: q001 1, every other query 0
+# rel-test-A (`irrelevant`): q003 1, q005 1, q008 1, every other query 0
+CALIB_JUDGE_FLAGS = {
+    CALIB_FAITH_A: {"q001": 0, "q002": 1, "q003": 0, "q004": 1, "q005": 0, "q006": 1,
+                    "q007": None, "q008": 1},
+    CALIB_FAITH_B: {"q001": 1, "q002": 0, "q003": 0, "q004": 0, "q005": 0, "q006": 0,
+                    "q007": 0, "q008": 0},
+    CALIB_REL_A: {"q001": 0, "q002": 0, "q003": 1, "q004": 0, "q005": 1, "q006": 0,
+                  "q007": 0, "q008": 1},
+}
+# Distinctive judge `faithfulness` scores of faith-test-A. A blind labelling tool must never print them.
+CALIB_FAITHFULNESS_VALUES = {"q001": 0.9137, "q002": 0.6481, "q003": 0.7752, "q004": 0.8326,
+                             "q005": 0.5903, "q006": 0.6618, "q008": 0.8842}
+
+
+@pytest.fixture
+def calibration_config():
+    """Calibration config dict with every key of configs/calibration.yaml (Step 9), tiny values.
+
+    labeler "tester", split_seed 3, check_fraction 0.4 (NOT 0.5: Python's round() rounds
+    half to even, so 0.5 * odd would be ambiguous), forced_tune_ids ["q001"], order_seed 11,
+    label_relevance True, show_check_items False, n_bootstrap 200, bootstrap_seed 7,
+    subset_seed 5, and a labeling_guide holding "GUIDE-MARKER-TEXT". Fresh dict per test.
+    """
+    return {
+        "labeler": "tester",
+        "split_seed": 3,
+        "check_fraction": 0.4,
+        "forced_tune_ids": ["q001"],
+        "order_seed": 11,
+        "label_relevance": True,
+        "show_check_items": False,
+        "n_bootstrap": 200,
+        "bootstrap_seed": 7,
+        "subset_seed": 5,
+        "labeling_guide": "GUIDE-MARKER-TEXT: label against the chunks shown.",
+    }
+
+
+@pytest.fixture
+def make_calibration_db(tmp_path, ready_queries):
+    """Factory for a tmp results DB for calibration tests; every connection is closed after the test.
+
+    make_calibration_db(run_id="run-calib-001", split="dev", status="completed", failed_ids=())
+    returns a namespace with `.conn`, `.path`, `.run_id`, `.markers`, `.answers`, `.chunks`.
+    Content: the 8 `ready_queries` (q001-q003 lookup, q004-q005 multi_chunk, q006 paraphrased,
+    q007-q008 unanswerable) with reference answers "REFERENCE-MARKER-<id>"; one run with 8 outputs
+    (ids in `failed_ids` are failed outputs with an error and no chunks). Each successful output
+    has the answer "Answer text for <id>: ..." and two chunks "CHUNK-TEXT-<id>-A" (rank 1, score
+    0.4) and "CHUNK-TEXT-<id>-B" (rank 2, score 0.9). Judge rows for the successful outputs, each
+    carrying marker strings in the reasoning (and claims) that a blind tool must never show:
+      faith-test-A  `faithfulness` + `ungrounded` (flags in CALIB_JUDGE_FLAGS) + judge_claims
+      faith-test-B  `faithfulness` + `ungrounded`
+      rel-test-A    `relevance` + `irrelevant`
+    `.markers` lists every such marker (reasoning, claim text, reference answer, score values).
+    No calibration rows yet.
+    """
+    from contextlib import ExitStack, closing
+    from types import SimpleNamespace
+
+    from evalharness import store
+
+    stack = ExitStack()
+    counter = {"n": 0}
+
+    def _make(run_id=CALIB_RUN_ID, split="dev", status="completed", failed_ids=()):
+        counter["n"] += 1
+        path = tmp_path / f"calibration_{counter['n']}.sqlite"
+        conn = stack.enter_context(closing(store.connect(path)))
+        queries = [q.model_copy(update={"reference_answer": f"REFERENCE-MARKER-{q.id}"})
+                   for q in ready_queries]
+        store.sync_queries(conn, queries)
+        store.start_run(conn, run_id=run_id, split=split, config={"name": "fake"},
+                        config_path="configs/fake.yaml", git_commit="abc1234", git_dirty=False,
+                        test_set_sha256="0" * 64, system_info={}, n_queries=8,
+                        llm_calls_start_id=0)
+        answers, chunks, markers = {}, {}, []
+        for q in queries:
+            if q.id in failed_ids:
+                store.write_output(conn, run_id=run_id, query_id=q.id, answer=None, chunks=None,
+                                   latency_ms=None, error="ContextLimitError: prompt too long")
+                continue
+            answers[q.id] = f"Answer text for {q.id}: employees get several days."
+            chunks[q.id] = [
+                {"chunk_id": "leave_policy#000", "doc_id": "leave_policy",
+                 "text": f"CHUNK-TEXT-{q.id}-A first passage.", "score": 0.4},
+                {"chunk_id": "payroll_policy#000", "doc_id": "payroll_policy",
+                 "text": f"CHUNK-TEXT-{q.id}-B second passage.", "score": 0.9},
+            ]
+            store.write_output(conn, run_id=run_id, query_id=q.id, answer=answers[q.id],
+                               chunks=chunks[q.id], latency_ms=10.0, error=None)
+            markers += [f"REFERENCE-MARKER-{q.id}", f"REASONING-MARKER-{q.id}",
+                        f"CLAIM-MARKER-{q.id}", f"CLAIMREASON-MARKER-{q.id}",
+                        f"REL-REASONING-MARKER-{q.id}"]
+            # faith-test-A: through write_judgement (scores + claims)
+            flag = CALIB_JUDGE_FLAGS[CALIB_FAITH_A][q.id]
+            if flag is None:
+                score_rows = [{"metric": "faithfulness", "value": None,
+                               "reasoning": f"judge failed: REASONING-MARKER-{q.id}"},
+                              {"metric": "ungrounded", "value": None,
+                               "reasoning": f"judge failed: REASONING-MARKER-{q.id}"}]
+                claim_rows = []
+            else:
+                value = CALIB_FAITHFULNESS_VALUES[q.id]
+                markers.append(str(value))
+                score_rows = [{"metric": "faithfulness", "value": value,
+                               "reasoning": f"REASONING-MARKER-{q.id}"},
+                              {"metric": "ungrounded", "value": float(flag),
+                               "reasoning": f"REASONING-MARKER-{q.id}"}]
+                claim_rows = [{"claim_index": 1, "claim": f"CLAIM-MARKER-{q.id}",
+                               "label": "supported", "reasoning": f"CLAIMREASON-MARKER-{q.id}"}]
+            store.write_judgement(conn, run_id, CALIB_FAITH_A, q.id, score_rows, claim_rows)
+            # faith-test-B and rel-test-A: plain score rows
+            store.write_scores(conn, run_id, CALIB_FAITH_B, [
+                {"query_id": q.id, "metric": "faithfulness", "value": 0.5,
+                 "reasoning": f"B-REASONING-MARKER-{q.id}"},
+                {"query_id": q.id, "metric": "ungrounded",
+                 "value": float(CALIB_JUDGE_FLAGS[CALIB_FAITH_B][q.id]),
+                 "reasoning": f"B-REASONING-MARKER-{q.id}"}])
+            irrelevant = CALIB_JUDGE_FLAGS[CALIB_REL_A][q.id]
+            store.write_scores(conn, run_id, CALIB_REL_A, [
+                {"query_id": q.id, "metric": "relevance", "value": 0.0 if irrelevant else 1.0,
+                 "reasoning": f"REL-REASONING-MARKER-{q.id}"},
+                {"query_id": q.id, "metric": "irrelevant", "value": float(irrelevant),
+                 "reasoning": f"REL-REASONING-MARKER-{q.id}"}])
+        if status != "running":
+            store.finish_run(conn, run_id, status=status, n_ok=8 - len(failed_ids),
+                             n_failed=len(failed_ids), llm_calls_summary={})
+        return SimpleNamespace(conn=conn, path=path, run_id=run_id, markers=markers,
+                               answers=answers, chunks=chunks)
+
+    yield _make
+    stack.close()
+
+
+@pytest.fixture
+def calibration_db(make_calibration_db):
+    """The default calibration DB (see `make_calibration_db`): completed dev run, 8 good outputs, no labels."""
+    return make_calibration_db()
