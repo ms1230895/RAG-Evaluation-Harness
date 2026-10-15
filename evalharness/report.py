@@ -270,10 +270,10 @@ def _pct(x: float | None) -> str:
 
 
 def _fmt_rate(s: dict) -> str:
-    """'0.087  7/80  [0.043, 0.170]', or '-' when n = 0."""
+    """'0.0875  7/80  [0.043, 0.170]', or '-' when n = 0."""
     if s["rate"] is None:
         return "-"
-    return f"{s['rate']:.3f}  {s['successes']}/{s['n']}  [{s['ci_low']:.3f}, {s['ci_high']:.3f}]"
+    return f"{s['rate']:.4f}  {s['successes']}/{s['n']}  [{s['ci_low']:.3f}, {s['ci_high']:.3f}]"
 
 
 def _fmt_rate_pct(s: dict) -> str:
@@ -402,7 +402,7 @@ def format_baseline_markdown(report: dict) -> str:
     for name in GROUP_NAMES:
         s = u[name]
         ci = "-" if s["rate"] is None else f"[{s['ci_low']:.3f}, {s['ci_high']:.3f}]"
-        rate = "-" if s["rate"] is None else f"{s['rate']:.3f}"
+        rate = "-" if s["rate"] is None else f"{s['rate']:.4f}"
         lines.append(f"| {name} | {s['successes']} | {s['n']} | {rate} | {ci} |")
     lines.extend(["", "## Failure cause of ungrounded answers", "",
                   "| Group | Cause | Rate over judged answers | Share of ungrounded answers |",
