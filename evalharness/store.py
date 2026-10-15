@@ -144,10 +144,19 @@ SCHEMA = (
     CREATE TABLE IF NOT EXISTS run_reports (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id        TEXT NOT NULL REFERENCES runs(run_id),
-        kind          TEXT NOT NULL,           -- "baseline" (Step 10), "experiment" (Step 11), "heldout" (Step 12)
+        kind          TEXT NOT NULL,           -- "baseline" (Step 10), "experiment" (11), "heldout" (12), "regression" (13)
         versions_json TEXT NOT NULL,           -- {"checks", "faithfulness", "relevance"}
         report_json   TEXT NOT NULL,
         created_at    TEXT NOT NULL
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS accepted_runs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id      TEXT NOT NULL REFERENCES runs(run_id),
+        split       TEXT NOT NULL,             -- dev only (Step 13)
+        accepted_at TEXT NOT NULL,             -- UTC ISO
+        accepted_by TEXT NOT NULL,             -- a human decision ("gaurav")
+        note        TEXT NOT NULL
     )""",
 )
 
@@ -493,3 +502,58 @@ def get_run_reports(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         item["report"] = json.loads(item.pop("report_json"))
         reports.append(item)
     return reports
+
+
+# ---------------------------------------------------------------- accepted runs and flags (Step 13)
+
+def write_accepted_run(conn: sqlite3.Connection, *, run_id: str, split: str, accepted_by: str,
+                       note: str) -> int:
+    """Record a run as the accepted reference of its split; returns the row id. Rows are never updated."""
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO accepted_runs (run_id, split, accepted_at, accepted_by, note)"
+            " VALUES (?, ?, ?, ?, ?)", (run_id, split, _now(), accepted_by, note))
+    return cursor.lastrowid
+
+
+def get_accepted_runs(conn: sqlite3.Connection, split: str | None = None) -> list[dict]:
+    """Accepted-run rows, newest first (id order reversed); one split or all."""
+    if split is None:
+        rows = conn.execute("SELECT * FROM accepted_runs ORDER BY id DESC").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM accepted_runs WHERE split = ? ORDER BY id DESC",
+                            (split,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def write_flag_rows(conn: sqlite3.Connection, run_id: str, flags: dict[str, list[str]]) -> None:
+    """Upsert one `reviews` row per flagged query in one transaction.
+
+    Only flag_reasons is written; an existing human_label or notes is left alone.
+    """
+    with conn:
+        conn.executemany(
+            "INSERT INTO reviews (run_id, query_id, flag_reasons) VALUES (?, ?, ?)"
+            " ON CONFLICT(run_id, query_id) DO UPDATE SET flag_reasons = excluded.flag_reasons",
+            [(run_id, query_id, json.dumps(reasons)) for query_id, reasons in sorted(flags.items())])
+
+
+def get_flag_rows(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """A run's `reviews` rows ordered by query_id; `flag_reasons` is the parsed JSON list."""
+    rows = conn.execute(
+        "SELECT run_id, query_id, flag_reasons, human_label, notes FROM reviews"
+        " WHERE run_id = ? ORDER BY query_id", (run_id,)).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["flag_reasons"] = json.loads(item["flag_reasons"]) if item["flag_reasons"] else []
+        out.append(item)
+    return out
+
+
+def delete_unlabelled_flag_rows(conn: sqlite3.Connection, run_id: str) -> int:
+    """Delete this run's review rows that have no human_label; returns how many. Labelled rows stay."""
+    with conn:
+        cursor = conn.execute("DELETE FROM reviews WHERE run_id = ? AND human_label IS NULL",
+                              (run_id,))
+    return cursor.rowcount

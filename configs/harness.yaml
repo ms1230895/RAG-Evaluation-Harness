@@ -55,3 +55,17 @@ experiments:
   n_bootstrap: 2000                   # resamples for the paired bootstrap of the faithfulness difference
   bootstrap_seed: 2029                # fixed, so a re-run prints the same interval
   table_path: experiments/experiment_table.md
+
+# Regression comparison and flagging (Step 13). Starting defaults approved by Gaurav on
+# 2026-10-16, not tuned values: there are no human "ungrounded" labels to tune against yet.
+# flag_version is computed from the first four keys; the gate and labeler are not part of it.
+regression:
+  relevance_below: 0.75               # low_relevance when the relevance value is below this (rubric 0 or 1 of 0/1/2)
+  answer_similarity_below: 0.6        # answer_changed when word similarity to the accepted answer is below this
+  similarity_ignore_pattern: '\[\d+\]'   # regex removed before comparing (citation markers like [2])
+  disagreement_rules:                 # judges_disagree rules that are on
+    - refusal_vs_relevance_a          # answerable, phrase check says refusal, relevance judge says fully relevant
+    - refusal_vs_relevance_b          # unanswerable, phrase check says no refusal, relevance judge says fully relevant
+  max_ungrounded_rise_points: 3.0     # gate: FAIL when new - accepted ungrounded rate is more than this, in points
+  labeler: gaurav                     # accepted_by value; human labels used by `thresholds` come from this labeler
+

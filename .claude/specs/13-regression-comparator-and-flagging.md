@@ -55,10 +55,12 @@ def answer_similarity(old: str, new: str, ignore_pattern: str) -> float:
     """Word-level SequenceMatcher ratio in [0, 1] after lowercasing and removing ignore_pattern.
     Two empty answers -> 1.0."""
 
-def flag_reasons(item: dict, previous: dict | None, similarity: float | None, cfg: dict) -> list[str]:
+def flag_reasons(item: dict, similarity: float | None, cfg: dict) -> list[str]:
     """Sorted list drawn from {"ungrounded", "low_relevance", "judges_disagree",
-    "answer_changed", "not_judged"}. `item` / `previous` are report.item_table rows.
-    A judge or output failure gives ["not_judged"] (never silently unflagged)."""
+    "answer_changed", "not_judged"}.
+    `item` is a report.item_table row; `similarity` is the word similarity to the accepted
+    run's answer, or None when there is nothing to compare. A judge or output failure gives
+    ["not_judged"] (never silently unflagged)."""
 
 def accept_run(conn, run_id: str, note: str, harness: dict) -> int:
     """Record run_id as the accepted reference for its split; returns accepted_runs.id.
@@ -82,11 +84,13 @@ def store_flags(conn, report: dict, *, replace: bool = False) -> str:
     "unchanged"; with a different flag_version it raises RegressionRefused unless
     replace=True, which deletes only this run's flag rows whose human_label IS NULL."""
 
-def flag_quality(conn, run_id: str, harness: dict) -> dict:
+def flag_quality(conn, run_id: str, harness: dict, against_run_id: str | None = None) -> dict:
     """Flag precision / recall of this run's flags against Gaurav's calibration_labels
-    (rows with grounded_label in grounded / ungrounded): tp, fp, fn, tn, precision, recall
-    with Wilson intervals; undefined (None) when a denominator is 0; counts of unsure and
-    unlabelled answers reported separately."""
+    (rows with grounded_label in grounded / ungrounded, from the configured labeler): tp, fp,
+    fn, tn, precision, recall with Wilson intervals; undefined (rate None) when a denominator
+    is 0; unsure, unlabelled and other-labeler answers counted separately. Labels exist only
+    for the run they were made on, so `run_id` must be that run; flags are recomputed in
+    memory (answer_changed only when against_run_id is given); `reviews` is not read."""
 
 def format_report(report: dict) -> str: ...        # terminal text, verdict first
 def format_markdown(report: dict) -> str: ...      # optional --markdown file
@@ -97,9 +101,9 @@ CLI (`python -m evalharness.regression ...`; exit codes: **0 gate passed, 1 gate
 
 ```
 accept     --run-id <id> --note "<why>"
-check      --run-id <id> [--against <run id>] [--markdown PATH [--force]] [--log PATH] [--no-store]
+check      --run-id <id> [--against <run id>] [--markdown PATH [--force]] [--log PATH] [--no-store] [--replace-flags]
 flags      --run-id <id>                      # list stored flags of a run, no recompute
-thresholds --run-id <id>                      # flag precision / recall vs Gaurav's labels
+thresholds --run-id <id> [--against <run id>]  # flag precision / recall vs Gaurav's labels (run the labels were made on)
 ```
 
 `check` is the Done-when command: it prints the flagged list (query id, type, reasons, question, answer excerpt, judge reasoning), the flag rate with Wilson interval, the gate numbers (accepted rate, new rate, delta in points, gate value, paired improved / regressed, exact p) and `PASS` or `FAIL`. Example:
