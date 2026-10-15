@@ -417,6 +417,16 @@ All resolved on 2026-10-15; Gaurav accepted every recommendation:
 7. ~~Where labels live.~~ **Option A:** new `calibration_labels` and
    `calibration_reports` tables.
 
+**Change on 2026-10-15 (Gaurav's choice, after labelling):** the first
+labelling pass (63 labels, all "grounded" / relevance 2, saved in about 142
+seconds) was judged not to be careful labelling and was cleared with Gaurav's
+explicit OK (backup kept outside the repo); the split was kept. Gaurav then
+chose a smaller set: label **only the 35 `check` answers**, keep the judge at
+`faith-v2-d130a39f` / `rel-v2-c825e4f7`, **no prompt iteration** (Decisions 2
+and 6 reduced). `label --split check` queues only that half. The `tune` half
+stays unlabelled and is excluded and counted; the figure is reported on
+`check` once, with its wide intervals.
+
 ## Definition of done
 - [ ] Labels exist, from Gaurav's own sessions:
       `sqlite3 data/results.sqlite "SELECT calib_split, grounded_label, COUNT(*) FROM calibration_labels WHERE run_id = '20261015T152638Z-v0-c7c96975' GROUP BY calib_split, grounded_label"`

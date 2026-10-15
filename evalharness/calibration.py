@@ -20,7 +20,7 @@ reported once on `check`. This module makes no LLM call and never writes a
 label by itself: labels come only from Gaurav's keystrokes.
 
 CLI:
-    python -m evalharness.calibration label   --run-id <id> [--relabel q057,q058]
+    python -m evalharness.calibration label   --run-id <id> [--split check] [--relabel q057,q058]
     python -m evalharness.calibration status  --run-id <id> [--ids tune|check]
     python -m evalharness.calibration compare --run-id <id> --judge faithfulness --version <v> --split tune
     python -m evalharness.calibration history --run-id <id>
@@ -158,11 +158,12 @@ def _ask_relevance(input_fn) -> int:
 
 
 def label_session(conn, run_id: str, cfg: dict, *, input_fn=input, print_fn=print,
-                  relabel: list[str] | None = None) -> dict:
+                  relabel: list[str] | None = None, only_split: str | None = None) -> dict:
     """Label the run's unlabelled answers (or re-label the named ids) with Gaurav's keystrokes.
 
     Keys: g grounded, u ungrounded, ? unsure, n add a note, s skip for now,
     q quit. Each label is committed at once, so quitting keeps everything so far.
+    only_split ("tune" | "check"): queue only that half's unlabelled answers.
     Failed outputs (outputs.error) have nothing to label and are skipped.
     """
     get_scorable_run(conn, run_id)
@@ -177,7 +178,8 @@ def label_session(conn, run_id: str, cfg: dict, *, input_fn=input, print_fn=prin
             raise ScoringRefused(f"query ids not in run {run_id}: {', '.join(unknown)}")
         todo = sorted(relabel)
     else:
-        todo = sorted(q for q, row in labels.items() if row["grounded_label"] is None)
+        todo = sorted(q for q, row in labels.items() if row["grounded_label"] is None
+                      and (only_split is None or row["calib_split"] == only_split))
         random.Random(cfg["order_seed"]).shuffle(todo)
 
     print_fn(cfg["labeling_guide"])
@@ -459,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     label = sub.add_parser("label", parents=[common], help="label answers (blind)")
     label.add_argument("--relabel", help="comma-separated ids to label again")
+    label.add_argument("--split", choices=CALIB_SPLITS, help="label only this half's answers")
     status = sub.add_parser("status", parents=[common], help="label counts by split and type")
     status.add_argument("--ids", choices=CALIB_SPLITS, help="print only this split's ids")
     comp = sub.add_parser("compare", parents=[common], help="judge vs labels on one split")
@@ -489,7 +492,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "label":
                 relabel = ([q.strip() for q in args.relabel.split(",") if q.strip()]
                            if args.relabel else None)
-                result = label_session(conn, args.run_id, cfg, relabel=relabel)
+                result = label_session(conn, args.run_id, cfg, relabel=relabel,
+                                       only_split=args.split)
                 print(f"\nlabelled {result['labelled']}, skipped {result['skipped']}, "
                       f"failed outputs {result['failed_outputs']}, remaining {result['remaining']}")
             elif args.command == "status":
