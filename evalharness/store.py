@@ -5,7 +5,9 @@ on 2026-10-15 (marked (+) in .claude/specs/05-runner-and-store.md):
 - queries: a copy of the test set, so SQL can join outputs to query type/split.
 - runs:    one row per run, with everything needed to reproduce it.
 - outputs: one row per (run, query): the answer and its chunks, or the error.
-- scores:  metric values per (run, query, metric); first written in Step 6.
+- scores:  metric values per (run, query, metric, version); first written in Step 6.
+           `version` names the scorer ("checks-1-<hash>", later judge versions),
+           so several versions for one run can be stored side by side.
 - reviews: human review per (run, query); first written in Steps 13/15.
 
 Every value goes in through `?` placeholders, never pasted into SQL text.
@@ -14,7 +16,9 @@ on the connection, which connect() does.
 
 Schema rule: once a real run exists, the database is never deleted to fix the
 schema (stored runs cost real API calls). Later steps add columns with
-ALTER TABLE ... ADD COLUMN in create_tables().
+ALTER TABLE ... ADD COLUMN in create_tables(). The one exception is Step 6's
+change to the `scores` primary key: the old table is dropped and recreated
+only while it has 0 rows (see _migrate_scores).
 """
 
 import json
@@ -75,10 +79,12 @@ SCHEMA = (
     CREATE TABLE IF NOT EXISTS scores (
         run_id    TEXT NOT NULL REFERENCES runs(run_id),
         query_id  TEXT NOT NULL REFERENCES queries(id),
-        metric    TEXT NOT NULL,
-        value     REAL,
-        reasoning TEXT,
-        PRIMARY KEY (run_id, query_id, metric)
+        metric    TEXT NOT NULL,                   -- "hit@4", "refusal", ...
+        version   TEXT NOT NULL,                   -- "checks-1-3fa1c27e"; judge versions later
+        value     REAL,                            -- NULL = not applicable / output failed
+        reasoning TEXT NOT NULL,                   -- why this value (or why NULL)
+        scored_at TEXT NOT NULL,                   -- UTC ISO
+        PRIMARY KEY (run_id, query_id, metric, version)
     )""",
     """
     CREATE TABLE IF NOT EXISTS reviews (
@@ -99,9 +105,27 @@ def _now() -> str:
 
 # ---------------------------------------------------------------- connection
 
+def _migrate_scores(conn: sqlite3.Connection) -> None:
+    """Replace a Step 5 `scores` table (no `version` column) with the Step 6 layout.
+
+    SQLite cannot change a primary key in place, so the old table is dropped
+    and recreated by SCHEMA, but only while it is empty. If it holds rows we
+    stop: stored scores are never thrown away.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(scores)")}
+    if not columns or "version" in columns:
+        return   # no table yet, or already the new layout
+    n_rows = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+    if n_rows:
+        raise RuntimeError(f"scores has {n_rows} rows in the old layout (no version column); "
+                           "not dropping stored scores")
+    conn.execute("DROP TABLE scores")
+
+
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create all five tables if they do not exist yet."""
+    """Create all five tables if they do not exist yet (after migrating an old empty scores table)."""
     with conn:
+        _migrate_scores(conn)
         for statement in SCHEMA:
             conn.execute(statement)
 
@@ -221,15 +245,57 @@ def write_output(conn: sqlite3.Connection, *, run_id: str, query_id: str, answer
         )
 
 
+def _parse_output_row(row: sqlite3.Row) -> dict:
+    """An outputs row as a dict, with retrieved_chunks_json parsed into `retrieved_chunks`."""
+    out = dict(row)
+    raw = out.pop("retrieved_chunks_json")
+    out["retrieved_chunks"] = json.loads(raw) if raw is not None else None
+    return out
+
+
 def get_outputs(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """A run's outputs in query_id order; `retrieved_chunks` is the parsed list (None on failure)."""
     rows = conn.execute(
         "SELECT run_id, query_id, answer, retrieved_chunks_json, latency_ms, error"
         " FROM outputs WHERE run_id = ? ORDER BY query_id", (run_id,)).fetchall()
+    return [_parse_output_row(row) for row in rows]
+
+
+def get_outputs_with_queries(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """get_outputs() rows plus the query's `type`, `split` and parsed `source_doc_ids`."""
+    rows = conn.execute(
+        "SELECT o.run_id, o.query_id, o.answer, o.retrieved_chunks_json, o.latency_ms, o.error,"
+        " q.type, q.split, q.source_doc_ids"
+        " FROM outputs o JOIN queries q ON q.id = o.query_id"
+        " WHERE o.run_id = ? ORDER BY o.query_id", (run_id,)).fetchall()
     outputs = []
     for row in rows:
-        out = dict(row)
-        raw = out.pop("retrieved_chunks_json")
-        out["retrieved_chunks"] = json.loads(raw) if raw is not None else None
+        out = _parse_output_row(row)
+        out["source_doc_ids"] = json.loads(out["source_doc_ids"])
         outputs.append(out)
     return outputs
+
+
+# ---------------------------------------------------------------- scores
+
+def write_scores(conn: sqlite3.Connection, run_id: str, version: str, rows: list[dict]) -> None:
+    """Insert score rows ({"query_id", "metric", "value", "reasoning"}) in one transaction.
+
+    All or nothing: if any row fails (duplicate key, NULL reasoning), none is stored.
+    """
+    scored_at = _now()
+    with conn:
+        conn.executemany(
+            "INSERT INTO scores (run_id, query_id, metric, version, value, reasoning, scored_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(run_id, row["query_id"], row["metric"], version, row["value"], row["reasoning"],
+              scored_at) for row in rows],
+        )
+
+
+def get_scores(conn: sqlite3.Connection, run_id: str, version: str) -> list[dict]:
+    """A run's score rows for one version, ordered by query_id, metric."""
+    rows = conn.execute(
+        "SELECT run_id, query_id, metric, version, value, reasoning, scored_at FROM scores"
+        " WHERE run_id = ? AND version = ? ORDER BY query_id, metric", (run_id, version)).fetchall()
+    return [dict(row) for row in rows]

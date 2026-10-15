@@ -380,3 +380,87 @@ def results_db(results_db_path):
 
     with closing(store.connect(results_db_path)) as conn:
         yield conn
+
+
+# ---------------------------------------------------------------- Step 6: checks and retrieval metrics
+
+SCORED_RUN_ID = "run-scored-001"
+
+
+def _chunk(doc_id, number):
+    """One contract-valid chunk dict, e.g. _chunk("leave_policy", 0) -> chunk_id "leave_policy#000"."""
+    return {"chunk_id": f"{doc_id}#{number:03d}", "doc_id": doc_id,
+            "text": f"Text of {doc_id} part {number}.", "score": 0.5}
+
+
+@pytest.fixture
+def checks_config():
+    """Small checks config: hit_ks [1, 2], four refusal phrases, a fixed version string.
+
+    Same shape as evalharness.checks.load_checks_config() returns, but built by hand
+    so tests of score_output / score_run do not depend on the config loader.
+    """
+    return {
+        "hit_ks": [1, 2],
+        "report_confidence": 0.95,
+        "refusal_phrases": ["no mention of", "does not mention", "doesn't mention", "cannot find"],
+        "version": "checks-test-v1",
+    }
+
+
+@pytest.fixture
+def scored_run_db(tmp_path, ready_queries):
+    """Tmp results DB with the 8 `ready_queries` and one completed run `SCORED_RUN_ID` (split dev).
+
+    Despite the name nothing is scored yet; tests call score_run themselves.
+    Returns a namespace with `.conn` (open, closed after the test), `.path` and `.run_id`.
+    Hand-made outputs (query: case; latency; chunk doc ids in rank order):
+      q001 lookup, source leave_policy: hit at rank 1; 100 ms; [leave, payroll, it]
+      q002 lookup, source payroll_policy: hit at rank 3; 200 ms; [it, leave, payroll]
+      q003 lookup, source it_policy: miss + false refusal ("doesn’t mention", curly); 300 ms;
+           [leave, payroll, payroll]
+      q004 multi_chunk, sources leave + payroll: partial hit (leave only, rank 1); 400 ms;
+           [leave, leave, it]
+      q005 multi_chunk, sources it + leave: FAILED output "ContextLimitError: prompt too long"
+      q006 paraphrased, source payroll_policy: empty answer "  \\n"; 50 ms; only one chunk [payroll]
+      q007 unanswerable: correct refusal ("There is no mention of ..."); 150 ms; [leave, payroll, it]
+      q008 unanswerable: invented answer, no refusal phrase; 250 ms; [leave, payroll, it]
+    Run llm_calls_json: one model, 7 real calls, 0 cache hits, 0 errors.
+    """
+    from contextlib import closing
+    from types import SimpleNamespace
+
+    from evalharness import store
+
+    path = tmp_path / "scored_run.sqlite"
+    three = [_chunk("leave_policy", 0), _chunk("payroll_policy", 0), _chunk("it_policy", 0)]
+    outputs = {
+        "q001": ("Employees get 8 casual leaves per year.", three, 100.0, None),
+        "q002": ("Salary is paid on the last working day.",
+                 [_chunk("it_policy", 0), _chunk("leave_policy", 1), _chunk("payroll_policy", 2)],
+                 200.0, None),
+        "q003": ("The context doesn’t mention laptops.",
+                 [_chunk("leave_policy", 0), _chunk("payroll_policy", 0), _chunk("payroll_policy", 1)],
+                 300.0, None),
+        "q004": ("Leave is 8 days and salary is paid monthly.",
+                 [_chunk("leave_policy", 0), _chunk("leave_policy", 1), _chunk("it_policy", 0)],
+                 400.0, None),
+        "q005": (None, None, None, "ContextLimitError: prompt too long"),
+        "q006": ("  \n", [_chunk("payroll_policy", 0)], 50.0, None),
+        "q007": ("There is no mention of pets in the policies.", three, 150.0, None),
+        "q008": ("Interns can use the office gym for free.", three, 250.0, None),
+    }
+    conn = store.connect(path)
+    with closing(conn):
+        store.sync_queries(conn, ready_queries)
+        store.start_run(conn, run_id=SCORED_RUN_ID, split="dev", config={"name": "fake"},
+                        config_path="configs/fake.yaml", git_commit="abc1234", git_dirty=False,
+                        test_set_sha256="0" * 64, system_info={}, n_queries=len(outputs),
+                        llm_calls_start_id=0)
+        for query_id, (answer, chunks, latency, error) in outputs.items():
+            store.write_output(conn, run_id=SCORED_RUN_ID, query_id=query_id, answer=answer,
+                               chunks=chunks, latency_ms=latency, error=error)
+        store.finish_run(conn, SCORED_RUN_ID, status="completed", n_ok=7, n_failed=1,
+                         llm_calls_summary={"gen-model": {"calls": 7, "hits": 0, "misses": 7,
+                                                          "errors": 0}})
+        yield SimpleNamespace(conn=conn, path=path, run_id=SCORED_RUN_ID)
