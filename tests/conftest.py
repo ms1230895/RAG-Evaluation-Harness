@@ -155,11 +155,21 @@ def pipeline_config(tmp_path, monkeypatch):
                       "query_prefix": "search_query: ", "batch_size": 4,
                       "max_input_words": 1000},
         "index": {"dir": str(tmp_path / "indexes")},
-        "retrieval": {"method": "vector", "top_k": 3},
+        "retrieval": {
+            "method": "vector", "top_k": 3,
+            # Step 11 blocks, all off: the fixture stays a plain v0 pipeline.
+            "bm25": {"k1": 1.5, "b": 0.75},
+            "hybrid": {"fusion": "rrf", "rrf_k": 60, "pool_k": 5},
+            "rerank": {"enabled": False, "pool_k": 5, "model": "fake-rerank",
+                       "revision": None, "worker_timeout_s": 5},
+        },
+        "query_rewrite": {"enabled": False,
+                          "prompt_template": "Rewrite as a search query: {question}"},
         "generation": {
             "model": "fake-gen:cloud", "model_digest": None, "temperature": 0.0, "seed": 42,
             "reasoning_effort": None, "max_prompt_tokens": 1000,
             "context_separator": "\n\n---\n\n",
+            "context_chunk_template": "{text}",
             "prompt_template": "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:",
         },
     }

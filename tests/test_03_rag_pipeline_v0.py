@@ -1176,7 +1176,12 @@ class TestConfig:
         assert config["embedding"]["query_prefix"] == "search_query: "
         assert config["embedding"]["batch_size"] == 32
         assert config["index"]["dir"] == "indexes"
-        assert config["retrieval"] == {"method": "vector", "top_k": 4}
+        retrieval = config["retrieval"]
+        assert (retrieval["method"], retrieval["top_k"]) == ("vector", 4)
+        # Step 11 added knobs; in v0 they are all off, so v0 behaves as before.
+        assert retrieval["rerank"]["enabled"] is False
+        assert config["query_rewrite"]["enabled"] is False
+        assert config["generation"]["context_chunk_template"] == "{text}"
         generation = config["generation"]
         assert generation["model"] == "gemma4:31b-cloud"
         assert generation["temperature"] == 0.0
@@ -1209,7 +1214,8 @@ class TestConfig:
     def test_required_config_keys_cover_every_section(self):
         """Spec: REQUIRED_CONFIG_KEYS maps section -> keys for all the sections in configs/v0.yaml."""
         assert set(REQUIRED_CONFIG_KEYS) == {
-            "corpus", "chunking", "embedding", "index", "retrieval", "generation"}
+            "corpus", "chunking", "embedding", "index", "retrieval", "query_rewrite",
+            "generation"}
         assert set(REQUIRED_CONFIG_KEYS["generation"]) >= {
             "model", "temperature", "seed", "reasoning_effort", "max_prompt_tokens",
             "context_separator", "prompt_template"}
@@ -1244,17 +1250,17 @@ class TestConfig:
         [("chunking", "chunk_size", 0), ("chunking", "chunk_overlap", 0)],   # size 0
         [("retrieval", "top_k", 0)],
         [("embedding", "batch_size", 0)],
-        [("retrieval", "method", "bm25")],
-        [("retrieval", "method", "hybrid")],
+        [("retrieval", "method", "tfidf")],     # bm25 and hybrid are supported since Step 11
+        [("retrieval", "method", "dense")],
         [("generation", "prompt_template", "Context: {context}\nAnswer:")],        # no {question}
         [("generation", "prompt_template", "Question: {question}\nAnswer:")],       # no {context}
         [("generation", "prompt_template", "{context} {question} {extra}")],        # unknown field
         [("generation", "prompt_template", "{context} {question} {")],              # stray brace
     ], ids=["overlap_eq_size", "overlap_gt_size", "overlap_negative", "size_zero", "top_k_zero",
-            "batch_size_zero", "method_bm25", "method_hybrid", "template_no_question",
+            "batch_size_zero", "method_tfidf", "method_dense", "template_no_question",
             "template_no_context", "template_unknown_field", "template_stray_brace"])
     def test_bad_values_raise(self, tmp_path, pipeline_config, changes):
-        """Spec: overlap >= size, size < 1, negative overlap, top_k 0, batch_size 0, method other than vector, or a bad template raise ValueError naming the file."""
+        """Spec: overlap >= size, size < 1, negative overlap, top_k 0, batch_size 0, a method that is not vector / bm25 / hybrid, or a bad template raise ValueError naming the file."""
         for section, key, value in changes:
             pipeline_config[section][key] = value
         path = write_pipeline_yaml(tmp_path, pipeline_config)
