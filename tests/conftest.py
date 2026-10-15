@@ -30,9 +30,46 @@ def llm_config(tmp_path):
     on the returned dict before calling generate().
     """
     return {
+        "base_url": "http://fake-llm.test/v1",
         "timeout_s": 5,
         "max_attempts": 5,
         "retry_wait_min_s": 0,
         "retry_wait_max_s": 0,
         "cache_path": tmp_path / "llm_cache_test.sqlite",
     }
+
+
+class FakeApi:
+    """Stand-in for llm.client._call_api: returns a canned ApiReply and records calls.
+
+    Set `reply` to change what is returned, or `error` to make every call raise.
+    Like the real retry loop it adds 1 to stats.attempts per call, even when it raises.
+    """
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.error = None
+        self.calls = []
+
+    def __call__(self, prompt, model, temperature, schema, config, stats):
+        stats.attempts += 1
+        self.calls.append(
+            {"prompt": prompt, "model": model, "temperature": temperature,
+             "schema": schema, "config": config}
+        )
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+@pytest.fixture
+def fake_api(monkeypatch):
+    """Replace llm.client._call_api with a FakeApi (no HTTP, no retries)."""
+    from llm import client
+
+    api = FakeApi(client.ApiReply(
+        text="hello", prompt_tokens=10, completion_tokens=5,
+        finish_reason="stop", model_latency_ms=1234.0,
+    ))
+    monkeypatch.setattr(client, "_call_api", api)
+    return api
