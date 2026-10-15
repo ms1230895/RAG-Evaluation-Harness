@@ -62,11 +62,11 @@ We build our own small, config-driven RAG pipeline (v0) so that every knob (chun
 ## Libraries
 | Job | Library |
 |---|---|
-| Embeddings | sentence-transformers with Qwen/Qwen3-Embedding-0.6B (runs locally) |
+| Embeddings | Ollama `nomic-embed-text` (runs locally, 768-dim), called through Ollama's OpenAI-compatible `/v1/embeddings` endpoint |
 | Vector search | faiss-cpu |
 | Keyword search (later experiment) | rank_bm25 |
 | Reranker (later experiment) | sentence-transformers CrossEncoder |
-| LLM calls | openai Python SDK pointed at an OpenAI-compatible endpoint (provider chosen in Step 2) |
+| LLM calls | openai Python SDK pointed at Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`), using Ollama cloud models: generator `gpt-oss:120b-cloud`, judge `deepseek-v4.1-flash:cloud` |
 | Structured judge output and test-set validation | pydantic |
 | Storage | sqlite3 (standard library) |
 | Analysis and statistics | pandas, numpy, scipy |
