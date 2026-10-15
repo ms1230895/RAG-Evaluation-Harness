@@ -18,9 +18,10 @@ one `judge_claims` row per claim, under a judge version like
 stored as value NULL with the reason, never as grounded or ungrounded.
 
 The relevance judge (Step 8) asks: does the answer address the question? One
-cached call sees the question, the answer and one line from the test set
-saying whether the HR policies can answer it (source_doc_ids == [] means
-not). It never sees the chunks or the reference answer. It returns a 0 / 1 / 2
+cached call sees the question, the answer and only the rubric that applies:
+the answerable or the not-answerable one, chosen from the test set
+(source_doc_ids == [] means not answerable). It never sees the chunks or the
+reference answer. It returns a 0 / 1 / 2
 rubric score; rows per output: relevance (score / 2) and irrelevant
 (score <= irrelevant_max_score). A correct refusal on an unanswerable query
 scores 2; a refusal on an answerable one, or an invented answer to an
@@ -83,9 +84,9 @@ TEMPLATE_FIELDS = {
 COMMON_KEYS = {"prompt_version", "model", "model_digest", "temperature", "seed",
                "reasoning_effort", "max_prompt_tokens", "max_consecutive_failures"}
 # Every key of the `relevance` block, and its template's exact placeholders.
-RELEVANCE_KEYS = COMMON_KEYS | {"irrelevant_max_score", "answerable_text", "unanswerable_text",
-                                "prompt_template"}
-RELEVANCE_TEMPLATE_FIELDS = {"prompt_template": {"question", "answer", "answerability"}}
+RELEVANCE_KEYS = COMMON_KEYS | {"irrelevant_max_score", "answerable_rubric",
+                                "unanswerable_rubric", "prompt_template"}
+RELEVANCE_TEMPLATE_FIELDS = {"prompt_template": {"question", "answer", "rubric"}}
 
 # Reasoning prefixes of NULL rows; the report counts items by them.
 NOT_JUDGED = "not judged: "
@@ -220,7 +221,7 @@ def load_relevance_config(path: str | Path) -> dict:
     _check_common(block, bad)
     if not _is_int(block["irrelevant_max_score"]) or block["irrelevant_max_score"] not in (0, 1):
         raise bad("irrelevant_max_score", "must be 0 or 1 (rubric scores are 0 / 1 / 2)")
-    for key in ("answerable_text", "unanswerable_text"):
+    for key in ("answerable_rubric", "unanswerable_rubric"):
         if not isinstance(block[key], str) or not block[key].strip():
             raise bad(key, "must be a non-empty string")
     _check_templates(block, RELEVANCE_TEMPLATE_FIELDS, bad)
@@ -460,21 +461,25 @@ def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
 
 # ---------------------------------------------------------------- relevance (Step 8)
 
-def answerability_text(source_doc_ids: list[str], cfg: dict) -> str:
-    """The answerability line for the prompt, from the test set: no source docs = not answerable."""
-    return cfg["answerable_text"] if source_doc_ids else cfg["unanswerable_text"]
+def rubric_for(source_doc_ids: list[str], cfg: dict) -> str:
+    """The one rubric that applies, from the test set: no source docs = not answerable.
+
+    Only this rubric goes into the prompt, so the judge cannot re-decide
+    answerability from the answer (prompt v1 showed both and it did).
+    """
+    return cfg["answerable_rubric"] if source_doc_ids else cfg["unanswerable_rubric"]
 
 
 def judge_relevance_output(output: dict, cfg: dict) -> RelevanceJudgement:
     """One call: the rubric score for one stored output. Raises JudgeError on any failure.
 
-    The judge sees the question, the answer and the answerability line only:
+    The judge sees the question, the answer and the applicable rubric only:
     never the chunks (relevance is not groundedness) and never the reference
     answer (relevance is not correctness).
     """
     prompt = cfg["prompt_template"].format(
         question=output["question"], answer=output["answer"],
-        answerability=answerability_text(output["source_doc_ids"], cfg))
+        rubric=rubric_for(output["source_doc_ids"], cfg).strip())
     verdict = _call(prompt, RelevanceVerdict, cfg)
     return RelevanceJudgement(score=verdict.score, relevance=verdict.score / 2,
                               irrelevant=int(verdict.score <= cfg["irrelevant_max_score"]),
