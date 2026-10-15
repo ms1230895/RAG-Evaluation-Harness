@@ -102,33 +102,31 @@ def _template_fields(template: str) -> set[str]:
     return {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
 
 
-def load_judges_config(path: str | Path) -> dict:
-    """Read configs/judges.yaml, check the `faithfulness` block, return it with its "version".
-
-    version = "faith-v<prompt_version>-<first 8 hex of sha256(every other setting
-    + the two reply schemas)>", so a changed prompt, model, digest, seed, effort
-    or threshold can never be mixed up with an older judgement, even if
-    prompt_version was not bumped. ValueError names the problem.
-    """
+def _load_block(path: str | Path, name: str, keys: set[str]) -> tuple[dict, Path]:
+    """The `name` block of a judges YAML file, after checking it has exactly `keys`."""
     path = resolve_path(path)
     with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
-    block = config.get("faithfulness") if isinstance(config, dict) else None
+    block = config.get(name) if isinstance(config, dict) else None
     if not isinstance(block, dict):
-        raise ValueError(f"{path}: 'faithfulness' must be a mapping")
-    missing = FAITHFULNESS_KEYS - set(block)
-    extra = set(block) - FAITHFULNESS_KEYS
+        raise ValueError(f"{path}: '{name}' must be a mapping")
+    missing = keys - set(block)
+    extra = set(block) - keys
     if missing or extra:
-        raise ValueError(f"{path}: faithfulness keys missing {sorted(missing)}, "
+        raise ValueError(f"{path}: {name} keys missing {sorted(missing)}, "
                          f"unknown {sorted(extra)}")
+    return block, path
 
-    def bad(key: str, rule: str) -> ValueError:
-        return ValueError(f"{path}: 'faithfulness.{key}' {rule}")
 
+def _check_common(block: dict, bad) -> None:
+    """Checks every judge block shares: version, model identity and call settings.
+
+    `bad(key, rule)` builds the ValueError that names the problem.
+    """
     if not _is_int(block["prompt_version"]) or block["prompt_version"] < 1:
         raise bad("prompt_version", "must be an integer >= 1")
-    for key in ("model", "model_digest", "context_separator"):
-        if not isinstance(block[key], str) or (key != "context_separator" and not block[key].strip()):
+    for key in ("model", "model_digest"):
+        if not isinstance(block[key], str) or not block[key].strip():
             raise bad(key, "must be a non-empty string")
     if isinstance(block["temperature"], bool) or block["temperature"] != 0:
         raise bad("temperature", "must be 0 (CLAUDE.md: judge temperature 0)")
@@ -139,17 +137,44 @@ def load_judges_config(path: str | Path) -> dict:
     for key in ("max_prompt_tokens", "max_consecutive_failures"):
         if not _is_int(block[key]) or block[key] < 1:
             raise bad(key, "must be an integer >= 1")
-    threshold = block["threshold"]
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 < threshold <= 1:
-        raise bad("threshold", "must be a number in (0, 1]")
-    for key, fields in TEMPLATE_FIELDS.items():
+
+
+def _check_templates(block: dict, template_fields: dict[str, set[str]], bad) -> None:
+    """Each template must be a string using exactly its placeholder names."""
+    for key, fields in template_fields.items():
         if not isinstance(block[key], str) or _template_fields(block[key]) != fields:
             raise bad(key, f"must be a string using exactly the placeholders {sorted(fields)}")
 
+
+def _version(prefix: str, block: dict, schemas: list) -> str:
+    """"<prefix>-v<prompt_version>-<first 8 hex of sha256(every other setting + schemas)>"."""
     settings = {key: value for key, value in block.items() if key != "prompt_version"}
-    settings["schemas"] = [ClaimList.model_json_schema(), ClaimVerdicts.model_json_schema()]
+    settings["schemas"] = [schema.model_json_schema() for schema in schemas]
     digest = hashlib.sha256(json.dumps(settings, sort_keys=True).encode("utf-8")).hexdigest()[:8]
-    return {**block, "version": f"faith-v{block['prompt_version']}-{digest}"}
+    return f"{prefix}-v{block['prompt_version']}-{digest}"
+
+
+def load_judges_config(path: str | Path) -> dict:
+    """Read configs/judges.yaml, check the `faithfulness` block, return it with its "version".
+
+    version = "faith-v<prompt_version>-<first 8 hex of sha256(every other setting
+    + the two reply schemas)>", so a changed prompt, model, digest, seed, effort
+    or threshold can never be mixed up with an older judgement, even if
+    prompt_version was not bumped. ValueError names the problem.
+    """
+    block, path = _load_block(path, "faithfulness", FAITHFULNESS_KEYS)
+
+    def bad(key: str, rule: str) -> ValueError:
+        return ValueError(f"{path}: 'faithfulness.{key}' {rule}")
+
+    _check_common(block, bad)
+    if not isinstance(block["context_separator"], str):
+        raise bad("context_separator", "must be a non-empty string")
+    threshold = block["threshold"]
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 < threshold <= 1:
+        raise bad("threshold", "must be a number in (0, 1]")
+    _check_templates(block, TEMPLATE_FIELDS, bad)
+    return {**block, "version": _version("faith", block, [ClaimList, ClaimVerdicts])}
 
 
 # ---------------------------------------------------------------- prompts and calls
@@ -280,26 +305,27 @@ def _judgement_rows(judgement: Judgement, threshold: float) -> tuple[list[dict],
     return score_rows, claim_rows
 
 
-def _null_rows(reason: str) -> list[dict]:
-    """The 3 score rows for an item with no judgement (value NULL, reason stored)."""
-    return [{"metric": metric, "value": None, "reasoning": reason}
-            for metric in FAITHFULNESS_METRICS]
+def _null_rows(reason: str, metrics: tuple[str, ...] = FAITHFULNESS_METRICS) -> list[dict]:
+    """One score row per metric for an item with no judgement (value NULL, reason stored)."""
+    return [{"metric": metric, "value": None, "reasoning": reason} for metric in metrics]
 
 
 # ---------------------------------------------------------------- judging a run
 
-def _faithfulness_reasonings(conn, run_id: str, version: str) -> dict[str, str]:
-    """{query_id: faithfulness reasoning} of the items already judged for this version."""
+def _stored_reasonings(conn, run_id: str, version: str, metric: str) -> dict[str, str]:
+    """{query_id: reasoning} of `metric` for the items already judged under this version."""
     return {row["query_id"]: row["reasoning"] for row in store.get_scores(conn, run_id, version)
-            if row["metric"] == "faithfulness"}
+            if row["metric"] == metric}
 
 
-def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
-              retry_failed: bool = False, query_ids: list[str] | None = None,
-              error_max_chars: int = 500) -> dict:
-    """Judge every output of a completed run that has no rows yet for this version.
+def _judge_items(conn, run_id: str, version: str, outputs: list[dict], judge_one,
+                 null_metrics: tuple[str, ...], *, retry_failed: bool,
+                 query_ids: list[str] | None, error_max_chars: int,
+                 max_consecutive_failures: int) -> dict:
+    """The per-item loop every judge shares.
 
-    Each item is stored (3 scores + its claims, one transaction) as soon as it is
+    judge_one(output) -> (score_rows, claim_rows), or raises JudgeError.
+    Each item is stored (scores + claims, one transaction) as soon as it is
     judged, so a crash keeps finished items and a rerun resumes from the cache.
     - failed output or blank answer: NULL rows, "not judged: ..." (no LLM call)
     - judge failure: NULL rows, "judge failed: ..."; counted, never dropped
@@ -307,20 +333,19 @@ def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
     - query_ids: judge only these outputs (a smoke test on a chosen mix)
     Stops ("aborted") after max_consecutive_failures judge failures in a row.
     """
-    get_scorable_run(conn, run_id, allow_heldout=allow_heldout)
-    version = cfg["version"]
-    outputs = store.get_outputs_with_queries(conn, run_id)
     if query_ids is not None:
         unknown = sorted(set(query_ids) - {o["query_id"] for o in outputs})
         if unknown:
             raise ScoringRefused(f"query ids not in run {run_id}: {', '.join(unknown)}")
 
-    existing = _faithfulness_reasonings(conn, run_id, version)
+    # The first metric of each judge marks an item as stored (all its rows are written together).
+    marker = null_metrics[0]
+    existing = _stored_reasonings(conn, run_id, version, marker)
     if retry_failed:
         for query_id, reasoning in existing.items():
             if reasoning.startswith(JUDGE_FAILED):
                 store.delete_judgement(conn, run_id, version, query_id)
-        existing = _faithfulness_reasonings(conn, run_id, version)
+        existing = _stored_reasonings(conn, run_id, version, marker)
 
     counts = {"judged": 0, "judge_failed": 0, "not_judged": 0, "skipped_existing": 0}
     todo = [o for o in outputs if query_ids is None or o["query_id"] in query_ids]
@@ -328,7 +353,7 @@ def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
 
     def store_null(query_id: str, reason: str) -> None:
         store.write_judgement(conn, run_id, version, query_id,
-                              _null_rows(reason[:error_max_chars]), [])
+                              _null_rows(reason[:error_max_chars], null_metrics), [])
 
     for output in tqdm(todo, desc=f"{version} {run_id}", unit="answer"):
         query_id = output["query_id"]
@@ -344,24 +369,43 @@ def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
             counts["not_judged"] += 1
             continue
         try:
-            judgement = judge_output(output, cfg)
+            score_rows, claim_rows = judge_one(output)
         except JudgeError as error:
             store_null(query_id, f"{JUDGE_FAILED}{error}")
             counts["judge_failed"] += 1
             streak += 1
-            if streak >= cfg["max_consecutive_failures"]:
+            if streak >= max_consecutive_failures:
                 status = "aborted"
                 break
             continue
-        score_rows, claim_rows = _judgement_rows(judgement, cfg["threshold"])
         store.write_judgement(conn, run_id, version, query_id, score_rows, claim_rows)
         counts["judged"] += 1
         streak = 0
 
     if status is None:
-        stored = _faithfulness_reasonings(conn, run_id, version)
+        stored = _stored_reasonings(conn, run_id, version, marker)
         status = "complete" if all(o["query_id"] in stored for o in outputs) else "partial"
     return {"status": status, "n_outputs": len(outputs), **counts}
+
+
+def judge_run(conn, run_id: str, cfg: dict, *, allow_heldout: bool = False,
+              retry_failed: bool = False, query_ids: list[str] | None = None,
+              error_max_chars: int = 500) -> dict:
+    """Judge faithfulness for every output of a completed run not yet judged under this version.
+
+    Rows per output: faithfulness, ungrounded, n_claims (+ one judge_claims row
+    per claim). See _judge_items for resume, retry, query_ids and failures.
+    """
+    get_scorable_run(conn, run_id, allow_heldout=allow_heldout)
+    outputs = store.get_outputs_with_queries(conn, run_id)
+
+    def judge_one(output: dict) -> tuple[list[dict], list[dict]]:
+        return _judgement_rows(judge_output(output, cfg), cfg["threshold"])
+
+    return _judge_items(conn, run_id, cfg["version"], outputs, judge_one, FAITHFULNESS_METRICS,
+                        retry_failed=retry_failed, query_ids=query_ids,
+                        error_max_chars=error_max_chars,
+                        max_consecutive_failures=cfg["max_consecutive_failures"])
 
 
 # ---------------------------------------------------------------- report
