@@ -1,0 +1,11 @@
+# Test set location and the exact shape it must have (Step 4).
+# Counts approved by Gaurav on 2026-10-15: 50 lookup / 20 multi_chunk /
+# 15 paraphrased / 15 unanswerable, 20% of each type held out.
+path: data/test_set.jsonl          # relative to the repo root
+docs_dir: data/docs                # only filenames are read, to check source_doc_ids
+split_seed: 2026                   # random.Random seed for assign-splits; used once
+expected_counts:                   # type -> split -> number of queries
+  lookup:       {dev: 40, heldout: 10}
+  multi_chunk:  {dev: 16, heldout: 4}
+  paraphrased:  {dev: 12, heldout: 3}
+  unanswerable: {dev: 12, heldout: 3}

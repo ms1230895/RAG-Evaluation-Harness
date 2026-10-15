@@ -163,3 +163,124 @@ def pipeline_config(tmp_path, monkeypatch):
             "prompt_template": "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:",
         },
     }
+
+
+# ---------------------------------------------------------------- Step 4: test set
+
+class ScriptedInput:
+    """Fake for the review tool's `input_fn`: returns scripted answers in order.
+
+    Raises AssertionError if the tool asks for more input than was scripted,
+    so a test never hangs or silently invents answers. `.answers` holds what
+    is left; `.prompts` records every prompt shown.
+    """
+
+    def __init__(self, answers):
+        """Store the answers to hand out, first to last."""
+        self.answers = list(answers)
+        self.prompts = []
+
+    def __call__(self, prompt=""):
+        """Return the next scripted answer, or fail if there is none."""
+        self.prompts.append(prompt)
+        if not self.answers:
+            raise AssertionError(f"review asked for more input than scripted: {prompt!r}")
+        return self.answers.pop(0)
+
+
+@pytest.fixture
+def scripted_input():
+    """Factory: scripted_input(["a", "s"]) gives a ScriptedInput for `review(input_fn=...)`."""
+    return ScriptedInput
+
+
+@pytest.fixture
+def make_query():
+    """Factory returning a valid lookup Query as a plain dict; keyword arguments override fields."""
+
+    def _make(**overrides):
+        row = {
+            "id": "q001",
+            "question": "How many casual leaves does an employee get?",
+            "type": "lookup",
+            "reference_answer": "8 casual leaves per year.",
+            "source_doc_ids": ["leave_policy"],
+            "split": None,
+            "reviewed": False,
+        }
+        row.update(overrides)
+        return row
+
+    return _make
+
+
+@pytest.fixture
+def testset_docs_dir(tmp_path):
+    """Tiny docs directory in tmp_path: leave_policy, payroll_policy, it_policy (.md).
+
+    Line facts used by tests: leave_policy has the number 8 and a line with the
+    whole word "Casual"; it_policy has "Casualties" (contains "casual" but is
+    not that whole word).
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "leave_policy.md").write_text(
+        "# Leave Policy\n\nEmployees get 8 Casual leaves per year.\nCarry forward is not allowed.\n",
+        encoding="utf-8")
+    (docs / "payroll_policy.md").write_text(
+        "# Payroll Policy\n\nSalary is paid on the last working day.\nPayslips are on the portal.\n",
+        encoding="utf-8")
+    (docs / "it_policy.md").write_text(
+        "# IT Policy\n\nEvery intern receives a laptop.\nCasualties are not a laptop topic.\n",
+        encoding="utf-8")
+    return docs
+
+
+@pytest.fixture
+def testset_config(tmp_path, testset_docs_dir):
+    """Test-set config dict for the 8-query `ready_queries` set (same keys as configs/test_set.yaml).
+
+    expected_counts: lookup 2 dev + 1 heldout, multi_chunk 1 + 1,
+    paraphrased 1 + 0, unanswerable 1 + 1 (8 queries). Paths are absolute tmp_path strings.
+    """
+    return {
+        "path": str(tmp_path / "test_set.jsonl"),
+        "docs_dir": str(testset_docs_dir),
+        "split_seed": 7,
+        "expected_counts": {
+            "lookup": {"dev": 2, "heldout": 1},
+            "multi_chunk": {"dev": 1, "heldout": 1},
+            "paraphrased": {"dev": 1, "heldout": 0},
+            "unanswerable": {"dev": 1, "heldout": 1},
+        },
+    }
+
+
+@pytest.fixture
+def ready_queries(make_query):
+    """The 8 correct, reviewed, split queries that match `testset_config` (check_ready gives [])."""
+    from evalharness.schemas import Query
+
+    rows = [
+        make_query(id="q001", question="Question one about leave?", split="dev", reviewed=True,
+                   source_doc_ids=["leave_policy"]),
+        make_query(id="q002", question="Question two about pay?", split="dev", reviewed=True,
+                   reference_answer="Paid on the last working day.", source_doc_ids=["payroll_policy"]),
+        make_query(id="q003", question="Question three about laptops?", split="heldout", reviewed=True,
+                   reference_answer="Every intern gets a laptop.", source_doc_ids=["it_policy"]),
+        make_query(id="q004", question="Question four across docs?", type="multi_chunk", split="dev",
+                   reviewed=True, reference_answer="Leave and pay.",
+                   source_doc_ids=["leave_policy", "payroll_policy"]),
+        make_query(id="q005", question="Question five across docs?", type="multi_chunk", split="heldout",
+                   reviewed=True, reference_answer="Laptop and leave.",
+                   source_doc_ids=["it_policy", "leave_policy"]),
+        make_query(id="q006", question="Question six, vague?", type="paraphrased", split="dev",
+                   reviewed=True, reference_answer="Paid at month end.", source_doc_ids=["payroll_policy"]),
+        make_query(id="q007", question="Question seven, not covered?", type="unanswerable", split="dev",
+                   reviewed=True, reference_answer="The Kestrel Labs HR policies do not cover this.",
+                   source_doc_ids=[]),
+        make_query(id="q008", question="Question eight, not covered?", type="unanswerable", split="heldout",
+                   reviewed=True, reference_answer="The Kestrel Labs HR policies do not cover this.",
+                   source_doc_ids=[]),
+    ]
+    return [Query.model_validate(row) for row in rows]
