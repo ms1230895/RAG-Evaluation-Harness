@@ -5,6 +5,7 @@ test_set_config: configs/test_set.yaml
 max_consecutive_failures: 5           # stop the run as 'aborted' after this many failures in a row
 error_max_chars: 500                  # error text stored per failed item is cut to this length
 judges_config: configs/judges.yaml    # LLM judge settings and prompts (Step 7)
+heldout_config: configs/heldout.yaml  # pre-registration of the one held-out run (Step 12)
 
 # The system under test, as "module:function". The harness imports these by
 # name, so evalharness/ never imports rag/ and another RAG system can be
