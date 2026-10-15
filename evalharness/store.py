@@ -16,6 +16,8 @@ on 2026-10-15 (marked (+) in .claude/specs/05-runner-and-store.md):
            and an optional 0/1/2 relevance label.
 - calibration_reports: one row per judge-vs-label comparison (every look is
            logged, including how often the check half was used).
+- run_reports: one row per stored run report (Step 10 baseline), with the
+           exact scorer versions it was built from.
 
 Every value goes in through `?` placeholders, never pasted into SQL text.
 Foreign keys are only enforced by SQLite when PRAGMA foreign_keys = ON is set
@@ -135,6 +137,15 @@ SCHEMA = (
         n             INTEGER NOT NULL,        -- pairs compared
         n_excluded    INTEGER NOT NULL,        -- unsure + unlabelled + not judged
         tp INTEGER NOT NULL, fp INTEGER NOT NULL, fn INTEGER NOT NULL, tn INTEGER NOT NULL,
+        report_json   TEXT NOT NULL,
+        created_at    TEXT NOT NULL
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS run_reports (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id        TEXT NOT NULL REFERENCES runs(run_id),
+        kind          TEXT NOT NULL,           -- "baseline" (Step 10)
+        versions_json TEXT NOT NULL,           -- {"checks", "faithfulness", "relevance"}
         report_json   TEXT NOT NULL,
         created_at    TEXT NOT NULL
     )""",
@@ -454,4 +465,31 @@ def get_calibration_reports(conn: sqlite3.Connection, run_id: str) -> list[dict]
         report = dict(row)
         report["report"] = json.loads(report.pop("report_json"))
         reports.append(report)
+    return reports
+
+
+# ---------------------------------------------------------------- run reports (Step 10)
+
+def write_run_report(conn: sqlite3.Connection, row: dict) -> int:
+    """Store one run report (kind, versions, full report) and return its id."""
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO run_reports (run_id, kind, versions_json, report_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (row["run_id"], row["kind"], json.dumps(row["versions"], sort_keys=True),
+             json.dumps(row["report"], sort_keys=True), row.get("created_at") or _now()),
+        )
+    return cursor.lastrowid
+
+
+def get_run_reports(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """A run's stored reports, oldest first; `versions` and `report` are parsed JSON."""
+    rows = conn.execute("SELECT * FROM run_reports WHERE run_id = ? ORDER BY id",
+                        (run_id,)).fetchall()
+    reports = []
+    for row in rows:
+        item = dict(row)
+        item["versions"] = json.loads(item.pop("versions_json"))
+        item["report"] = json.loads(item.pop("report_json"))
+        reports.append(item)
     return reports

@@ -1020,3 +1020,155 @@ def make_calibration_db(tmp_path, ready_queries):
 def calibration_db(make_calibration_db):
     """The default calibration DB (see `make_calibration_db`): completed dev run, 8 good outputs, no labels."""
     return make_calibration_db()
+
+
+# ---------------------------------------------------------------- Step 10: baseline report
+
+BASELINE_RUN_ID = "run-baseline-001"
+BASELINE_VERSIONS = {"checks": "checks-bl-test", "faithfulness": "faith-bl-test",
+                     "relevance": "rel-bl-test"}
+BASELINE_SHA = "ab" * 32
+BASELINE_COMMIT = "abc1234"
+
+# (id, type, source docs, in_context, hit@4, reciprocal_rank, refusal,
+#  faithfulness, ungrounded, n_claims, relevance, irrelevant)
+# faithfulness None = the faithfulness judge failed for this item.
+# in_context / hit@4 / reciprocal_rank None = not applicable (unanswerable).
+_BASELINE_CASES = [
+    ("q001", "lookup", ["leave_policy"], 1, 1, 1.0, 0, 1.0, 0, 3, 1.0, 0),
+    ("q002", "lookup", ["payroll_policy"], 1, 1, 0.5, 0, 0.5, 1, 4, 1.0, 0),
+    ("q003", "lookup", ["it_policy"], 0, 0, 0.0, 0, 0.6, 1, 5, 0.5, 0),
+    ("q004", "lookup", ["leave_policy"], 0, 0, 0.0, 1, 1.0, 0, 0, 0.0, 1),
+    ("q005", "multi_chunk", ["leave_policy", "payroll_policy"], 1, 1, 1.0, 0, 1.0, 0, 2, 1.0, 0),
+    ("q006", "multi_chunk", ["it_policy", "leave_policy"], 1, 1, 0.25, 0, 0.75, 1, 4, 1.0, 0),
+    ("q007", "paraphrased", ["payroll_policy"], 1, 1, 0.5, 0, 1.0, 0, 2, 1.0, 0),
+    ("q008", "paraphrased", ["it_policy"], 1, 1, 1.0, 0, None, None, None, 1.0, 0),
+    ("q009", "unanswerable", [], None, None, None, 1, 1.0, 0, 0, 1.0, 0),
+    ("q010", "unanswerable", [], None, None, None, 0, 0.0, 1, 2, 0.0, 1),
+]
+
+
+@pytest.fixture
+def baseline_db(tmp_path, make_query):
+    """Tmp results DB for the Step 10 report: 10 dev queries, one completed dev run, three scorings.
+
+    Namespace: `.conn`, `.path`, `.run_id` ("run-baseline-001"), `.versions` (checks "checks-bl-test",
+    faithfulness "faith-bl-test", relevance "rel-bl-test"), `.sha`, `.commit` (git_dirty is True),
+    `.set_score(version, query_id, metric, value, reasoning=None)` (UPDATE one stored score row),
+    `.add_faith_version(version)` (a second, fully judged faithfulness scoring with 0 ungrounded),
+    `.add_calibration_report(judge, version, tp, fp, fn, tn, calib_split="check")`.
+
+    Hand values (judge = uncalibrated), per item:
+      id    type          in_ctx refusal faith  ungr irrel   cause
+      q001  lookup          1      0     1.0     0    0      -
+      q002  lookup          1      0     0.5     1    0      generation_error
+      q003  lookup          0      0     0.6     1    0      retrieval_miss
+      q004  lookup          0      1     1.0     0    1      -        (false refusal)
+      q005  multi_chunk     1      0     1.0     0    0      -
+      q006  multi_chunk     1      0     0.75    1    0      generation_error
+      q007  paraphrased     1      0     1.0     0    0      -
+      q008  paraphrased     1      0     FAILED (judge failed)  irrel 0 (relevance judged)
+      q009  unanswerable    n/a    1     1.0     0    0      -        (correct refusal)
+      q010  unanswerable    n/a    0     0.0     1    1      generation_error (invented answer)
+    Faithfulness judged 9 (q008 failed), ungrounded 4/9; relevance judged 10.
+    """
+    from contextlib import closing
+    from types import SimpleNamespace
+
+    from evalharness import store
+    from evalharness.schemas import Query
+
+    path = tmp_path / "baseline.sqlite"
+    run_id = BASELINE_RUN_ID
+    versions = BASELINE_VERSIONS
+    queries = []
+    for number, case in enumerate(_BASELINE_CASES, start=1):
+        qid, qtype, sources = case[0], case[1], case[2]
+        queries.append(Query.model_validate(make_query(
+            id=qid, question=f"Baseline question number {number}?", type=qtype,
+            reference_answer=f"Reference {qid}.", source_doc_ids=sources, split="dev",
+            reviewed=True)))
+    conn = store.connect(path)
+    with closing(conn):
+        store.sync_queries(conn, queries)
+        store.start_run(conn, run_id=run_id, split="dev", config={"name": "fake"},
+                        config_path="configs/fake.yaml", git_commit=BASELINE_COMMIT,
+                        git_dirty=True, test_set_sha256=BASELINE_SHA, system_info={},
+                        n_queries=10, llm_calls_start_id=0)
+        chunks = [{"chunk_id": "leave_policy#000", "doc_id": "leave_policy",
+                   "text": "Some chunk text.", "score": 0.5}]
+        checks_rows, faith_rows, rel_rows = [], [], []
+        for (qid, _t, _s, in_ctx, hit4, rr, refusal, faith, ungr, n_claims, rel, irrel) in _BASELINE_CASES:
+            store.write_output(conn, run_id=run_id, query_id=qid, answer=f"Answer text {qid}.",
+                               chunks=chunks, latency_ms=10.0, error=None)
+            na = "not applicable: no source documents"
+            checks_rows += [
+                {"query_id": qid, "metric": "empty_answer", "value": 0.0, "reasoning": "not empty"},
+                {"query_id": qid, "metric": "refusal", "value": float(refusal), "reasoning": "hand"},
+                {"query_id": qid, "metric": "in_context",
+                 "value": None if in_ctx is None else float(in_ctx),
+                 "reasoning": na if in_ctx is None else "hand"},
+                {"query_id": qid, "metric": "hit@4",
+                 "value": None if hit4 is None else float(hit4),
+                 "reasoning": na if hit4 is None else "hand"},
+                {"query_id": qid, "metric": "reciprocal_rank", "value": rr,
+                 "reasoning": na if rr is None else "hand"},
+            ]
+            if faith is None:
+                failed = "judge failed: LLMOutputError: bad json from judge"
+                faith_rows += [{"query_id": qid, "metric": m, "value": None, "reasoning": failed}
+                               for m in ("faithfulness", "ungrounded", "n_claims")]
+            else:
+                faith_rows += [
+                    {"query_id": qid, "metric": "faithfulness", "value": faith, "reasoning": "hand"},
+                    {"query_id": qid, "metric": "ungrounded", "value": float(ungr), "reasoning": "hand"},
+                    {"query_id": qid, "metric": "n_claims", "value": float(n_claims), "reasoning": "hand"},
+                ]
+            rel_rows += [
+                {"query_id": qid, "metric": "relevance", "value": rel, "reasoning": "hand"},
+                {"query_id": qid, "metric": "irrelevant", "value": float(irrel), "reasoning": "hand"},
+            ]
+        store.finish_run(conn, run_id, status="completed", n_ok=10, n_failed=0,
+                         llm_calls_summary={})
+        store.write_scores(conn, run_id, versions["checks"], checks_rows)
+        store.write_scores(conn, run_id, versions["faithfulness"], faith_rows)
+        store.write_scores(conn, run_id, versions["relevance"], rel_rows)
+
+        def set_score(version, query_id, metric, value, reasoning=None):
+            with conn:
+                if reasoning is None:
+                    conn.execute("UPDATE scores SET value = ? WHERE run_id = ? AND version = ?"
+                                 " AND query_id = ? AND metric = ?",
+                                 (value, run_id, version, query_id, metric))
+                else:
+                    conn.execute("UPDATE scores SET value = ?, reasoning = ? WHERE run_id = ?"
+                                 " AND version = ? AND query_id = ? AND metric = ?",
+                                 (value, reasoning, run_id, version, query_id, metric))
+
+        def add_faith_version(version):
+            rows = []
+            for case in _BASELINE_CASES:
+                rows += [{"query_id": case[0], "metric": "faithfulness", "value": 1.0,
+                          "reasoning": "other version"},
+                         {"query_id": case[0], "metric": "ungrounded", "value": 0.0,
+                          "reasoning": "other version"},
+                         {"query_id": case[0], "metric": "n_claims", "value": 1.0,
+                          "reasoning": "other version"}]
+            store.write_scores(conn, run_id, version, rows)
+
+        def add_calibration_report(judge, version, tp, fp, fn, tn, calib_split="check"):
+            from evalharness.calibration import agreement_report
+
+            # pairs are (human says positive, judge says positive)
+            pairs = ([(True, True)] * tp + [(False, True)] * fp
+                     + [(True, False)] * fn + [(False, False)] * tn)
+            report = agreement_report(pairs, {"n_bootstrap": 20, "bootstrap_seed": 1}, 0.95)
+            return store.write_calibration_report(conn, {
+                "run_id": run_id, "judge": judge, "judge_version": version,
+                "calib_split": calib_split, "n": len(pairs), "n_excluded": 0,
+                "tp": tp, "fp": fp, "fn": fn, "tn": tn, "report": report})
+
+        yield SimpleNamespace(conn=conn, path=path, run_id=run_id, versions=dict(versions),
+                              sha=BASELINE_SHA, commit=BASELINE_COMMIT, set_score=set_score,
+                              add_faith_version=add_faith_version,
+                              add_calibration_report=add_calibration_report)
