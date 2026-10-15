@@ -1,7 +1,9 @@
 """Pydantic models for the evaluation harness.
 
 Step 4: `Query`, one line of data/test_set.jsonl.
-(The judges' output schemas join this file in Step 7.)
+Step 7: the faithfulness judge's reply schemas, `ClaimList` (call 1) and
+`ClaimVerdicts` (call 2). llm/client.py validates every judge reply against
+them, so a malformed verdict raises and is never cached or scored.
 
 The models are strict on purpose: bad data should fail loudly when the
 test set is loaded, not quietly skew a metric later.
@@ -71,3 +73,55 @@ class Query(BaseModel):
             raise ValueError(f"a {self.type} query needs at least one source doc ID")
         return self
 
+
+
+# ---------------------------------------------------------------- judge replies (Step 7)
+
+Label = Literal["supported", "unsupported", "contradicted"]
+LABELS: tuple[str, ...] = get_args(Label)
+
+
+class ClaimList(BaseModel):
+    """Call 1 reply: the answer split into atomic claims ([] for a pure refusal)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    claims: list[str]
+
+    @field_validator("claims")
+    @classmethod
+    def claims_not_blank(cls, value: list[str]) -> list[str]:
+        stripped = [claim.strip() for claim in value]
+        if any(not claim for claim in stripped):
+            raise ValueError("a claim must not be blank")
+        return stripped
+
+
+class ClaimVerdict(BaseModel):
+    """One claim's verdict.
+
+    Field order matters: models write JSON fields in schema order, so the
+    reasoning comes before the label (explain first, then decide).
+    No defaults: a reply without a label is invalid, never "supported".
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    claim_index: int = Field(ge=1)       # 1-based, matches the numbered claim list
+    reasoning: str
+    label: Label
+
+    @field_validator("reasoning")
+    @classmethod
+    def reasoning_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reasoning must not be blank")
+        return value.strip()
+
+
+class ClaimVerdicts(BaseModel):
+    """Call 2 reply: one verdict per claim."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    verdicts: list[ClaimVerdict]
