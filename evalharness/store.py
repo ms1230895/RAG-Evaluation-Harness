@@ -11,6 +11,11 @@ on 2026-10-15 (marked (+) in .claude/specs/05-runner-and-store.md):
 - reviews: human review per (run, query); first written in Steps 13/15.
 - judge_claims: per-claim verdicts of the faithfulness judge (Step 7), one row
            per (run, query, version, claim), so a score can be traced to its claims.
+- calibration_labels: Gaurav's own labels for judge calibration (Step 9): the
+           fixed tune/check split per answer, grounded / ungrounded / unsure,
+           and an optional 0/1/2 relevance label.
+- calibration_reports: one row per judge-vs-label comparison (every look is
+           logged, including how often the check half was used).
 
 Every value goes in through `?` placeholders, never pasted into SQL text.
 Foreign keys are only enforced by SQLite when PRAGMA foreign_keys = ON is set
@@ -107,6 +112,31 @@ SCHEMA = (
         label       TEXT NOT NULL CHECK (label IN ('supported', 'unsupported', 'contradicted')),
         reasoning   TEXT NOT NULL,
         PRIMARY KEY (run_id, query_id, version, claim_index)
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS calibration_labels (
+        run_id          TEXT NOT NULL REFERENCES runs(run_id),
+        query_id        TEXT NOT NULL REFERENCES queries(id),
+        calib_split     TEXT NOT NULL CHECK (calib_split IN ('tune', 'check')),
+        grounded_label  TEXT CHECK (grounded_label IN ('grounded', 'ungrounded', 'unsure')),
+        relevance_label INTEGER CHECK (relevance_label IN (0, 1, 2)),
+        notes           TEXT,
+        labeler         TEXT,                  -- set with the label; only Gaurav labels
+        labeled_at      TEXT,                  -- UTC ISO; NULL = not labelled yet
+        PRIMARY KEY (run_id, query_id)
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS calibration_reports (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id        TEXT NOT NULL REFERENCES runs(run_id),
+        judge         TEXT NOT NULL,           -- faithfulness | relevance
+        judge_version TEXT NOT NULL,
+        calib_split   TEXT NOT NULL,           -- tune | check | all
+        n             INTEGER NOT NULL,        -- pairs compared
+        n_excluded    INTEGER NOT NULL,        -- unsure + unlabelled + not judged
+        tp INTEGER NOT NULL, fp INTEGER NOT NULL, fn INTEGER NOT NULL, tn INTEGER NOT NULL,
+        report_json   TEXT NOT NULL,
+        created_at    TEXT NOT NULL
     )""",
 )
 
@@ -356,3 +386,72 @@ def get_judge_claims(conn: sqlite3.Connection, run_id: str, version: str) -> lis
         " WHERE run_id = ? AND version = ? ORDER BY query_id, claim_index",
         (run_id, version)).fetchall()
     return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------- calibration (Step 9)
+
+def save_calibration_splits(conn: sqlite3.Connection, run_id: str, splits: dict[str, str]) -> None:
+    """Store the tune/check split once (labels NULL). The split never changes afterwards.
+
+    Same splits already stored: nothing happens. Different: ValueError.
+    """
+    stored = {row["query_id"]: row["calib_split"] for row in conn.execute(
+        "SELECT query_id, calib_split FROM calibration_labels WHERE run_id = ?", (run_id,))}
+    if stored:
+        if stored != splits:
+            raise ValueError(f"calibration split for run {run_id} is fixed once assigned "
+                             "and differs from the new one")
+        return
+    with conn:
+        conn.executemany(
+            "INSERT INTO calibration_labels (run_id, query_id, calib_split) VALUES (?, ?, ?)",
+            [(run_id, query_id, split) for query_id, split in sorted(splits.items())])
+
+
+def get_calibration_labels(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """A run's calibration rows (split and label, if any), ordered by query_id."""
+    rows = conn.execute(
+        "SELECT run_id, query_id, calib_split, grounded_label, relevance_label, notes, labeler,"
+        " labeled_at FROM calibration_labels WHERE run_id = ? ORDER BY query_id",
+        (run_id,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def write_calibration_label(conn: sqlite3.Connection, run_id: str, query_id: str,
+                            grounded_label: str, relevance_label: int | None,
+                            notes: str | None, labeler: str) -> None:
+    """Store one human label on its split row and commit at once (a quit keeps every label so far)."""
+    with conn:
+        updated = conn.execute(
+            "UPDATE calibration_labels SET grounded_label = ?, relevance_label = ?, notes = ?,"
+            " labeler = ?, labeled_at = ? WHERE run_id = ? AND query_id = ?",
+            (grounded_label, relevance_label, notes, labeler, _now(), run_id, query_id),
+        ).rowcount
+    if updated != 1:
+        raise ValueError(f"no calibration split row for {run_id} / {query_id}")
+
+
+def write_calibration_report(conn: sqlite3.Connection, row: dict) -> int:
+    """Log one judge-vs-label comparison; returns its id."""
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO calibration_reports (run_id, judge, judge_version, calib_split, n,"
+            " n_excluded, tp, fp, fn, tn, report_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["run_id"], row["judge"], row["judge_version"], row["calib_split"], row["n"],
+             row["n_excluded"], row["tp"], row["fp"], row["fn"], row["tn"],
+             json.dumps(row["report"], sort_keys=True), _now()),
+        )
+    return cursor.lastrowid
+
+
+def get_calibration_reports(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """Every logged comparison for a run, oldest first; `report` is the parsed report_json."""
+    rows = conn.execute("SELECT * FROM calibration_reports WHERE run_id = ? ORDER BY id",
+                        (run_id,)).fetchall()
+    reports = []
+    for row in rows:
+        report = dict(row)
+        report["report"] = json.loads(report.pop("report_json"))
+        reports.append(report)
+    return reports
