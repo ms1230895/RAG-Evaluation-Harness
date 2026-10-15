@@ -1,0 +1,48 @@
+# Pipeline v0: a plain, untuned baseline. Each Step 11 experiment copies
+# this file and changes ONE value. Values approved by Gaurav on 2026-10-15;
+# they are starting defaults, not tuned values.
+name: v0
+
+corpus:
+  docs_dir: data/docs                 # relative to the repo root
+
+chunking:
+  chunk_size: 150                     # words per chunk
+  chunk_overlap: 30                   # words shared with the previous chunk
+
+embedding:
+  model: nomic-embed-text             # local Ollama model, 768-dim, max 2048 tokens per input
+  doc_prefix: "search_document: "     # nomic's documented passage prefix
+  query_prefix: "search_query: "      # nomic's documented question prefix
+  batch_size: 32                      # texts per embeddings request
+  max_input_words: 1000               # chunk_size must not exceed this: nomic reads at most 2048 tokens and Ollama truncates silently
+
+index:
+  dir: indexes                        # relative to the repo root; gitignored; one file pair per index_key
+
+retrieval:
+  method: vector                      # only "vector" in v0; bm25/hybrid come in Step 11
+  top_k: 4                            # chunks put into the prompt
+
+generation:
+  model: gemma4:31b-cloud
+  model_digest: null                  # model build identity; null in v0, Step 5 fills it (part of the cache key)
+  temperature: 0.0                    # fixed and low (CLAUDE.md); 0 keeps sampling noise out of comparisons
+  seed: 42                            # sent to the API, part of the cache key
+  reasoning_effort: null              # null = not sent; gemma4 thinking defaults to off
+  # A conservative guard, NOT gemma4's real limit (262144 tokens): the /v1
+  # endpoint cannot set num_ctx, so we stay below Ollama's common 4096 default.
+  # answer() raises ContextLimitError at or above this, or when the server
+  # reports no prompt_tokens. Larger Step 11 configs may hit it; those
+  # failures must be counted, not dropped.
+  max_prompt_tokens: 3500
+  context_separator: "\n\n---\n\n"    # between chunks in the prompt
+  prompt_template: |                  # must contain {context} and {question}
+    Use the following context to answer the question.
+
+    Context:
+    {context}
+
+    Question: {question}
+
+    Answer:
