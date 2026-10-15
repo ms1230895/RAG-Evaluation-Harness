@@ -5,19 +5,31 @@
 - `db_path`: throwaway SQLite path in `tmp_path` (never the real results DB).
 - `llm_config`: config dict for `llm.client` (all six keys of `configs/llm.yaml`, fake `base_url`), `cache_path` in `tmp_path`, retry waits 0.
 - `fake_api`: replaces `llm.client._call_api` with a `FakeApi` (set `.reply` or `.error`, read `.calls`). Its signature has the `stats` argument and it does `stats.attempts += 1` per call, even when it raises, like the real retry loop.
+- `fake_embed`: replaces `rag.embedder._embed_texts(texts, model)` (the single seam to `llm.client.embed`) with a `FakeEmbed`. Vector = raw counts of 8 vocabulary words (leave, salary, payroll, laptop, intern, holiday, policy, onboarding) + a constant 1.0 (dim 9), NOT normalised, so tests check our code normalises. Records `.calls` (`texts`, `model`) and `.texts` (every text embedded, prefixes included).
+- `pipeline_config`: fresh pipeline config dict for a tiny corpus written to `tmp_path/docs`: 3 docs (`leave_policy`, `payroll_policy`, `it_policy`) of exactly 20 words each; `chunk_size` 8, `chunk_overlap` 2 gives 3 chunks per doc (9 chunks), `top_k` 3, `batch_size` 4. `index.dir` and `corpus.docs_dir` are absolute `tmp_path` strings. It also resets `rag.index._LOADED` (use `index._LOADED.clear()` to simulate a fresh process).
 
 ## Test files
 - `test_setup.py` (Step 0): every dependency imports.
 - `test_corpus.py` (Step 1): HR corpus loads, IDs unique, no garbage text.
 - `test_02_llm_wrapper.py` (Step 2, rewritten after the 2nd review-updated spec): six-input cache key (+ spec formula), cache hit/miss per input incl. `model_digest`, `attempts`, schema parsing (code fences), output checks (empty, `finish_reason != "stop"`, bad JSON, cache-hit parse failure logged), tenacity retries (4 transient types retried, permanent not), `_send_request` with a fake client object, `_call_api` + `CallStats`, `llm_cache` / `llm_calls` columns and rows, `load_config` (keys looped from `REQUIRED_CONFIG_KEYS`, bad values), rag/ layering guard. An autouse fixture blocks the real `_get_client`.
+- `test_03_rag_pipeline_v0.py` (Step 3): chunker (worked example, boundaries, overlap, line breaks, bad settings, real corpus read-only), embedder (prefixes, normalising, batching, zero vector), `llm.client.embed` (fake client object, ordering by `index`, retries), FAISS index (hand-made 2-D cosine, save/load, `index_key` rules, `get_index` memory/disk/rebuild and log lines), retriever, `build_prompt`, `answer()` contract (keys, types, top_k, settings passed to `generate`, latency from `model_latency_ms`, error propagation, empty question, `ContextLimitError` boundary), `load_pipeline_config` (`configs/v0.yaml`, missing keys, bad values, boundaries), plus the code-review additions: `describe_index`, empty-corpus error, disk-load warm-up query, `index_key` with `CHUNKER_VERSION` and embedding `base_url` (patch `rag.index.load_llm_config`), `prompt_tokens=None` -> `ContextLimitError`, `model_digest` passthrough, stricter config type checks and `max_input_words`. Uses a local `FakeGenerate` (monkeypatched at `rag.pipeline.generate`) and an autouse guard on `llm.client._get_client`.
+- `test_02_llm_wrapper.py` also holds the Step 3 additions: `seed` and `reasoning_effort` in the cache key, both tables, `generate()` -> `_call_api` -> `_send_request` (sent only when not None; `seed=0` is a value).
 
 ## Patterns that work
 - LLM wrapper: pass `config=llm_config` to `generate()`, use `fake_api` for cache/schema/logging tests, or `install_fake_send(monkeypatch, outcomes)` in the test file (fakes `_send_request` + `_get_client`) so the real tenacity loop runs. `_send_request` itself is tested with `FakeOpenAIClient` (records `chat.completions.create(**kwargs)`).
 - Transient errors: `openai.APIConnectionError(request=httpx2.Request("POST", "http://test"))`; status errors need `response=httpx2.Response(code, request=...)`, `body=None`.
 - Inspect the cache DB with `contextlib.closing(sqlite3.connect(path))` and `?` placeholders.
+- RAG pipeline: patch the embedding seam `rag.embedder._embed_texts` and the name `rag.pipeline.generate` (where it is used); pass `pipeline_config` (a dict, no YAML needed) straight to `get_index` / `answer`. For YAML tests write it with `yaml.safe_dump` to `tmp_path` (it round-trips unchanged).
+- Retrieval order is hand-checkable with the vocabulary fake: query "leave" vs `leave_policy#000` = 5 / (sqrt(18) * sqrt(2)) = 5/6; all-filler chunks score 1/sqrt(2) = 0.7071 (ties, so assert only rank 1, never ranks 2-3).
+- Embeddings: `llm.client.embed` tests use a fake client object with `embeddings.create(**kwargs)` returning `SimpleNamespace(data=[SimpleNamespace(index=, embedding=)])`.
 
 ## Pitfalls found
 - `httpx2` is imported in the Step 2 tests only for building openai errors; it comes through `openai==3.31`.
 - Config tests loop over `REQUIRED_CONFIG_KEYS`; never hand-copy key names or the endpoint.
 - openai v3.31 uses `httpx2`, not `httpx`.
 - After retries are exhausted the original `openai` error is re-raised (`reraise=True`), as the spec says.
+- Filler chunks tie on score in the tiny corpus; never assert an order among tied chunks.
+- `seed=0` is falsy: tests check it is sent, keyed and stored (not treated as None).
+- Spec does not name the request kwargs for `seed` / `reasoning_effort`; tests assume the openai SDK names (`seed=`, `reasoning_effort=`) as top-level `create()` kwargs.
+- `rag.index` imports `CHUNKER_VERSION` by name, so the version test patches both `rag.chunker.CHUNKER_VERSION` and `rag.index.CHUNKER_VERSION`; `index_key` reads the real `configs/llm.yaml` `base_url` unless `rag.index.load_llm_config` is patched.
+- A disk load embeds one warm-up query (`rag.index.WARM_UP_TEXT`); tests that count embedded texts after `_LOADED.clear()` must expect that one extra text.

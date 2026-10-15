@@ -16,6 +16,14 @@ model and returns its reply. Around that single call it adds:
   table with its token counts, finish reason, latencies, number of API
   attempts and any error.
 
+Optional request settings `seed` and `reasoning_effort` are sent only when not
+None, and are always part of the cache key and the stored rows, because both
+can change the reply.
+
+embed(texts, model) returns embedding vectors from the same endpoint, with the
+same retry loop. It is not cached here (the pipeline saves its document
+vectors in a FAISS index file) and not logged to llm_calls.
+
 Two latencies are kept apart on purpose:
 - model_latency_ms: time of the one successful HTTP request, i.e. real model
   time. Stored in the cache, so a cache hit reports the original model time.
@@ -153,7 +161,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 def make_cache_key(prompt: str, model: str, temperature: float,
                    schema: type[BaseModel] | None, base_url: str,
-                   model_digest: str | None = None) -> str:
+                   model_digest: str | None = None, seed: int | None = None,
+                   reasoning_effort: str | None = None) -> str:
     """SHA-256 hex digest of the canonical JSON of everything that changes the output.
 
     sort_keys=True makes the string identical whatever the dict order, and
@@ -162,7 +171,9 @@ def make_cache_key(prompt: str, model: str, temperature: float,
     base_url is included so the same model tag served by a different endpoint
     never reuses replies from the old one. model_digest (the model build, e.g.
     an Ollama digest; None until Step 5 supplies it) is included so a re-pulled
-    or updated model never reuses replies from the old build.
+    or updated model never reuses replies from the old build. seed and
+    reasoning_effort (None = not sent) are included because both can change
+    the reply.
     """
     key_input = json.dumps(
         {
@@ -170,6 +181,8 @@ def make_cache_key(prompt: str, model: str, temperature: float,
             "model": model,
             "model_digest": model_digest,
             "prompt": prompt,
+            "reasoning_effort": reasoning_effort,
+            "seed": seed,
             "temperature": float(temperature),
             "schema": schema.model_json_schema() if schema is not None else None,
         },
@@ -191,6 +204,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
                 model             TEXT,
                 model_digest      TEXT,
                 temperature       REAL,
+                seed              INTEGER,
+                reasoning_effort  TEXT,
                 schema_name       TEXT,
                 prompt            TEXT,
                 response_text     TEXT,
@@ -208,6 +223,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
                 cache_key         TEXT,
                 model             TEXT,
                 model_digest      TEXT,
+                seed              INTEGER,
+                reasoning_effort  TEXT,
                 cached            INTEGER,
                 attempts          INTEGER,
                 prompt_tokens     INTEGER,
@@ -246,32 +263,35 @@ def _read_cache(conn: sqlite3.Connection, key: str) -> ApiReply | None:
 
 
 def _write_cache(conn: sqlite3.Connection, *, key: str, base_url: str, model: str,
-                 model_digest: str | None, temperature: float, schema_name: str | None,
+                 model_digest: str | None, temperature: float, seed: int | None,
+                 reasoning_effort: str | None, schema_name: str | None,
                  prompt: str, reply: ApiReply) -> None:
     """Store one validated reply. Only called after all output checks passed."""
     with conn:
         conn.execute(
             "INSERT OR REPLACE INTO llm_cache (cache_key, base_url, model, model_digest,"
-            " temperature, schema_name, prompt, response_text, prompt_tokens,"
-            " completion_tokens, finish_reason, model_latency_ms, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (key, base_url, model, model_digest, float(temperature), schema_name, prompt,
-             reply.text,
+            " temperature, seed, reasoning_effort, schema_name, prompt, response_text,"
+            " prompt_tokens, completion_tokens, finish_reason, model_latency_ms, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (key, base_url, model, model_digest, float(temperature), seed, reasoning_effort,
+             schema_name, prompt, reply.text,
              reply.prompt_tokens, reply.completion_tokens, reply.finish_reason,
              reply.model_latency_ms, _now()),
         )
 
 
 def _log_call(conn: sqlite3.Connection, *, key: str, model: str, model_digest: str | None,
+              seed: int | None, reasoning_effort: str | None,
               cached: bool, attempts: int, reply: ApiReply | None, latency_ms: float,
               error: str | None) -> None:
     """Append one row to llm_calls. `reply` is None when the API call itself failed."""
     with conn:
         conn.execute(
-            "INSERT INTO llm_calls (called_at, cache_key, model, model_digest, cached, attempts,"
-            " prompt_tokens, completion_tokens, finish_reason, latency_ms, model_latency_ms, error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (_now(), key, model, model_digest, int(cached), attempts,
+            "INSERT INTO llm_calls (called_at, cache_key, model, model_digest, seed,"
+            " reasoning_effort, cached, attempts, prompt_tokens, completion_tokens,"
+            " finish_reason, latency_ms, model_latency_ms, error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (_now(), key, model, model_digest, seed, reasoning_effort, int(cached), attempts,
              reply.prompt_tokens if reply else None,
              reply.completion_tokens if reply else None,
              reply.finish_reason if reply else None,
@@ -295,7 +315,8 @@ def _get_client(base_url: str, timeout_s: float) -> openai.OpenAI:
 
 
 def _send_request(client: openai.OpenAI, prompt: str, model: str, temperature: float,
-                  schema: type[BaseModel] | None) -> ApiReply:
+                  schema: type[BaseModel] | None, seed: int | None = None,
+                  reasoning_effort: str | None = None) -> ApiReply:
     """Exactly one HTTP call. Only the request itself is timed (model_latency_ms)."""
     request = {
         "model": model,
@@ -304,6 +325,12 @@ def _send_request(client: openai.OpenAI, prompt: str, model: str, temperature: f
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
     }
+    # Optional settings are sent only when set, so a None request is exactly
+    # what the server would see without them.
+    if seed is not None:
+        request["seed"] = seed
+    if reasoning_effort is not None:
+        request["reasoning_effort"] = reasoning_effort
     if schema is not None:
         # Ask the server to constrain the reply to this JSON Schema.
         # We still validate with pydantic afterwards (see _check_reply).
@@ -335,18 +362,15 @@ def _log_retry(retry_state: RetryCallState) -> None:
                    retry_state.attempt_number, type(error).__name__)
 
 
-def _call_api(prompt: str, model: str, temperature: float,
-              schema: type[BaseModel] | None, config: dict, stats: CallStats) -> ApiReply:
-    """_send_request wrapped in a retry loop built from config.
-    stats.attempts counts every HTTP attempt, including failed ones.
+def _retrying(config: dict) -> Retrying:
+    """The retry policy built from config, shared by _call_api and embed().
 
     Waits between tries: retry_wait_min_s * 2^(attempt-1), capped at
     retry_wait_max_s. With min=2, max=30, max_attempts=5: 2, 4, 8, 16 s.
-    reraise=True: after the last try the original error is raised, not a
-    tenacity RetryError.
+    Only TRANSIENT_ERRORS are retried. reraise=True: after the last try the
+    original error is raised, not a tenacity RetryError.
     """
-    client = _get_client(config["base_url"], config["timeout_s"])
-    retrying = Retrying(
+    return Retrying(
         stop=stop_after_attempt(config["max_attempts"]),
         # retry_wait_min_s is used twice on purpose: as the multiplier it makes
         # the first wait equal to it (min * 2^0), and as `min` it is the floor.
@@ -360,11 +384,20 @@ def _call_api(prompt: str, model: str, temperature: float,
         reraise=True,
     )
 
+
+def _call_api(prompt: str, model: str, temperature: float,
+              schema: type[BaseModel] | None, config: dict, stats: CallStats,
+              seed: int | None = None, reasoning_effort: str | None = None) -> ApiReply:
+    """_send_request wrapped in the retry loop from _retrying(config).
+    stats.attempts counts every HTTP attempt, including failed ones."""
+    client = _get_client(config["base_url"], config["timeout_s"])
+
     def one_attempt() -> ApiReply:
         stats.attempts += 1
-        return _send_request(client, prompt, model, temperature, schema)
+        return _send_request(client, prompt, model, temperature, schema,
+                             seed=seed, reasoning_effort=reasoning_effort)
 
-    return retrying(one_attempt)
+    return _retrying(config)(one_attempt)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -409,7 +442,8 @@ def _check_reply(reply: ApiReply, model: str, schema: type[BaseModel] | None) ->
 
 def generate(prompt: str, model: str, temperature: float,
              schema: type[BaseModel] | None = None, *,
-             config: dict | None = None, model_digest: str | None = None) -> LLMResult:
+             config: dict | None = None, model_digest: str | None = None,
+             seed: int | None = None, reasoning_effort: str | None = None) -> LLMResult:
     """Send one user message to the model and return its reply.
 
     Checks the cache first; on a miss, calls the API with retries, checks the
@@ -418,13 +452,16 @@ def generate(prompt: str, model: str, temperature: float,
     a failed call (hit or miss) is logged with its error, then re-raised.
     `config` defaults to configs/llm.yaml. `model_digest` identifies the model
     build (Step 5 supplies it); it is part of the cache key and stored rows.
+    `seed` and `reasoning_effort` are sent only when not None, and are always
+    part of the cache key and stored rows.
     Raises LLMOutputError if the reply is empty, did not finish normally, or
     does not match `schema`.
     """
     start = time.perf_counter()
     if config is None:
         config = load_config()
-    key = make_cache_key(prompt, model, temperature, schema, config["base_url"], model_digest)
+    key = make_cache_key(prompt, model, temperature, schema, config["base_url"], model_digest,
+                         seed, reasoning_effort)
     stats = CallStats()
     reply = None
     cached = False
@@ -439,22 +476,26 @@ def generate(prompt: str, model: str, temperature: float,
             else:
                 # Cache miss: real API call. Check the reply BEFORE writing, so a
                 # bad reply raises here and never reaches the cache.
-                reply = _call_api(prompt, model, temperature, schema, config, stats)
+                reply = _call_api(prompt, model, temperature, schema, config, stats,
+                                  seed=seed, reasoning_effort=reasoning_effort)
                 parsed = _check_reply(reply, model, schema)
         except Exception as e:
             # Log the failure (one row per call, hit or miss), then re-raise.
-            _log_call(conn, key=key, model=model, model_digest=model_digest, cached=cached,
+            _log_call(conn, key=key, model=model, model_digest=model_digest, seed=seed,
+                      reasoning_effort=reasoning_effort, cached=cached,
                       attempts=stats.attempts, reply=reply, latency_ms=_elapsed_ms(start),
                       error=f"{type(e).__name__}: {str(e)[:ERROR_PREVIEW_CHARS]}")
             raise
 
         if not cached:
+            schema_name = schema.__name__ if schema is not None else None
             _write_cache(conn, key=key, base_url=config["base_url"], model=model,
-                         model_digest=model_digest, temperature=temperature,
-                         schema_name=schema.__name__ if schema is not None else None,
+                         model_digest=model_digest, temperature=temperature, seed=seed,
+                         reasoning_effort=reasoning_effort, schema_name=schema_name,
                          prompt=prompt, reply=reply)
         latency_ms = _elapsed_ms(start)
-        _log_call(conn, key=key, model=model, model_digest=model_digest, cached=cached,
+        _log_call(conn, key=key, model=model, model_digest=model_digest, seed=seed,
+                  reasoning_effort=reasoning_effort, cached=cached,
                   attempts=stats.attempts, reply=reply, latency_ms=latency_ms, error=None)
 
     logger.info("model=%s cached=%s attempts=%d prompt_tokens=%s completion_tokens=%s "
@@ -467,6 +508,35 @@ def generate(prompt: str, model: str, temperature: float,
                      finish_reason=reply.finish_reason, latency_ms=latency_ms,
                      model_latency_ms=reply.model_latency_ms, cached=cached,
                      attempts=stats.attempts, model_digest=model_digest)
+
+
+def embed(texts: list[str], model: str, *, config: dict | None = None) -> list[list[float]]:
+    """Return one embedding vector per text, in input order.
+
+    One embeddings request to the same OpenAI-compatible endpoint, inside the
+    same retry loop as generate(). Not cached and not logged to llm_calls:
+    the pipeline saves document vectors in its FAISS index file, and a query
+    vector is one fast local call. Vectors are returned as the server sent
+    them (the caller normalises).
+    Raises ValueError on an empty list, LLMOutputError if the server returns
+    a different number of vectors than texts sent.
+    """
+    if not texts:
+        raise ValueError("embed() needs at least one text")
+    start = time.perf_counter()
+    if config is None:
+        config = load_config()
+    client = _get_client(config["base_url"], config["timeout_s"])
+    response = _retrying(config)(
+        lambda: client.embeddings.create(model=model, input=texts)
+    )
+    # Each item carries the position of its input; sort by it rather than
+    # trusting the response order.
+    data = sorted(response.data, key=lambda item: item.index)
+    if len(data) != len(texts):
+        raise LLMOutputError(f"{model} returned {len(data)} embeddings for {len(texts)} texts")
+    logger.info("embed model=%s texts=%d latency_ms=%.1f", model, len(texts), _elapsed_ms(start))
+    return [item.embedding for item in data]
 
 
 # ---------------------------------------------------------------- CLI demo

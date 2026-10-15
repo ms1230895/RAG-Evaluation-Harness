@@ -117,7 +117,8 @@ class FakeSend:
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def __call__(self, client_obj, prompt, model, temperature, schema):
+    def __call__(self, client_obj, prompt, model, temperature, schema,
+                 seed=None, reasoning_effort=None):
         """Count the call, then raise or return the next outcome."""
         self.calls += 1
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
@@ -176,7 +177,8 @@ def write_config_file(tmp_path, config, drop=None, **overrides):
 
 class TestCacheKey:
     BASE = dict(prompt="Say hi", model="m:cloud", temperature=0.0, schema=None,
-                base_url="http://fake-llm.test/v1", model_digest=None)
+                base_url="http://fake-llm.test/v1", model_digest=None,
+                seed=None, reasoning_effort=None)
 
     def test_cache_key_is_stable(self):
         """Spec: same inputs give the same 64-char hex SHA-256 key."""
@@ -186,10 +188,11 @@ class TestCacheKey:
         assert re.fullmatch(r"[0-9a-f]{64}", first), "Key must be 64 lowercase hex characters"
 
     def test_cache_key_matches_spec_formula(self):
-        """Spec: key = sha256(json.dumps({base_url, model, model_digest, prompt, temperature, schema}, sort_keys=True))."""
+        """Spec: key = sha256(json.dumps({base_url, model, model_digest, prompt, reasoning_effort, seed, temperature, schema}, sort_keys=True))."""
         expected_input = json.dumps(
             {"base_url": "http://fake-llm.test/v1", "model": "m:cloud", "model_digest": None,
-             "prompt": "Say hi", "temperature": 0.0, "schema": None},
+             "prompt": "Say hi", "reasoning_effort": None, "seed": None,
+             "temperature": 0.0, "schema": None},
             sort_keys=True,
         )
         expected = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
@@ -377,12 +380,14 @@ class TestResultAndRequest:
         cache_cols = {r["name"] for r in fetch(llm_config, "PRAGMA table_info(llm_cache)")}
         call_cols = {r["name"] for r in fetch(llm_config, "PRAGMA table_info(llm_calls)")}
         assert cache_cols == {
-            "cache_key", "base_url", "model", "model_digest", "temperature", "schema_name",
+            "cache_key", "base_url", "model", "model_digest", "temperature", "seed",
+            "reasoning_effort", "schema_name",
             "prompt", "response_text", "prompt_tokens", "completion_tokens", "finish_reason",
             "model_latency_ms", "created_at",
         }
         assert call_cols == {
-            "id", "called_at", "cache_key", "model", "model_digest", "cached", "attempts",
+            "id", "called_at", "cache_key", "model", "model_digest", "seed", "reasoning_effort",
+            "cached", "attempts",
             "prompt_tokens", "completion_tokens", "finish_reason", "latency_ms",
             "model_latency_ms", "error",
         }
@@ -872,6 +877,206 @@ class TestLoadConfig:
         """Spec: REQUIRED_CONFIG_KEYS is a public tuple of six keys."""
         assert isinstance(REQUIRED_CONFIG_KEYS, tuple)
         assert len(REQUIRED_CONFIG_KEYS) == 6
+
+
+# ---------------------------------------------------------------- Step 3 additions: seed + reasoning_effort
+# From .claude/specs/03-rag-pipeline-v0.md ("Step 2 additions" and "Change to llm/client.py").
+
+class TestSeedAndReasoningEffortKey:
+    BASE = dict(prompt="Say hi", model="m:cloud", temperature=0.0, schema=None,
+                base_url="http://fake-llm.test/v1")
+
+    @pytest.mark.parametrize("field, value", [
+        ("seed", 42),
+        ("seed", 0),
+        ("reasoning_effort", "low"),
+    ])
+    def test_cache_key_changes_when_field_is_set(self, field, value):
+        """Spec: seed and reasoning_effort are part of the key (seed=0 is a value, not 'unset')."""
+        unset = make_cache_key(**self.BASE)
+        with_value = make_cache_key(**self.BASE, **{field: value})
+        assert with_value != unset, f"{field}={value!r} must change the cache key"
+
+    def test_cache_key_changes_between_two_seeds(self):
+        """Spec: seed 1 and seed 2 give different keys."""
+        assert make_cache_key(**self.BASE, seed=1) != make_cache_key(**self.BASE, seed=2)
+
+    def test_cache_key_changes_between_two_reasoning_efforts(self):
+        """Spec: reasoning_effort 'low' and 'high' give different keys."""
+        low = make_cache_key(**self.BASE, reasoning_effort="low")
+        high = make_cache_key(**self.BASE, reasoning_effort="high")
+        assert low != high
+
+    def test_cache_key_same_seed_and_effort_is_stable(self):
+        """Spec: identical inputs, including seed and reasoning_effort, give the same key."""
+        first = make_cache_key(**self.BASE, seed=42, reasoning_effort="low")
+        second = make_cache_key(**self.BASE, seed=42, reasoning_effort="low")
+        assert first == second
+
+    def test_cache_key_defaults_equal_explicit_none(self):
+        """Spec: seed and reasoning_effort default to None, which equals passing None."""
+        assert make_cache_key(**self.BASE) == make_cache_key(
+            **self.BASE, seed=None, reasoning_effort=None)
+
+    def test_cache_key_matches_spec_formula_with_values(self):
+        """Spec: the key JSON has 8 fields and includes seed and reasoning_effort values."""
+        expected_input = json.dumps(
+            {"base_url": "http://fake-llm.test/v1", "model": "m:cloud", "model_digest": None,
+             "prompt": "Say hi", "reasoning_effort": "low", "seed": 42,
+             "temperature": 0.0, "schema": None},
+            sort_keys=True,
+        )
+        expected = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
+        assert make_cache_key(**self.BASE, seed=42, reasoning_effort="low") == expected
+
+
+class TestSeedAndReasoningEffortCaching:
+    def test_different_seed_misses_cache(self, fake_api, llm_config):
+        """Spec: the same request with seed 1 then seed 2 calls the API twice."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=1)
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=2)
+        assert len(fake_api.calls) == 2, "A new seed must miss the cache"
+
+    def test_same_seed_hits_cache(self, fake_api, llm_config):
+        """Spec: an identical seed is part of an identical request, so the second call hits."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=1)
+        hit = generate(PROMPT, MODEL, 0.0, config=llm_config, seed=1)
+        assert len(fake_api.calls) == 1
+        assert hit.cached is True
+
+    def test_seed_none_and_seed_zero_are_different_requests(self, fake_api, llm_config):
+        """Spec: None means 'not sent'; 0 is a real seed, so they must not share a cache row."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config)
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=0)
+        assert len(fake_api.calls) == 2
+
+    def test_different_reasoning_effort_misses_cache(self, fake_api, llm_config):
+        """Spec: the same request with reasoning_effort 'low' then 'high' calls the API twice."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, reasoning_effort="low")
+        generate(PROMPT, MODEL, 0.0, config=llm_config, reasoning_effort="high")
+        assert len(fake_api.calls) == 2, "A new reasoning_effort must miss the cache"
+
+    def test_same_reasoning_effort_hits_cache(self, fake_api, llm_config):
+        """Spec: an identical reasoning_effort hits the cache."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, reasoning_effort="low")
+        hit = generate(PROMPT, MODEL, 0.0, config=llm_config, reasoning_effort="low")
+        assert len(fake_api.calls) == 1
+        assert hit.cached is True
+
+    def test_reasoning_effort_none_and_low_are_different_requests(self, fake_api, llm_config):
+        """Spec: None (not sent) and 'low' are different requests."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config)
+        generate(PROMPT, MODEL, 0.0, config=llm_config, reasoning_effort="low")
+        assert len(fake_api.calls) == 2
+
+
+class TestSeedAndReasoningEffortStored:
+    def test_cache_row_stores_seed_and_reasoning_effort(self, fake_api, llm_config):
+        """Spec: llm_cache stores seed and reasoning_effort, and the row sits under the 8-field key."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=42, reasoning_effort="low")
+        rows = cache_rows(llm_config)
+        assert len(rows) == 1
+        assert rows[0]["seed"] == 42
+        assert rows[0]["reasoning_effort"] == "low"
+        expected_key = make_cache_key(PROMPT, MODEL, 0.0, None, llm_config["base_url"],
+                                      seed=42, reasoning_effort="low")
+        assert rows[0]["cache_key"] == expected_key
+
+    def test_calls_row_stores_seed_and_reasoning_effort(self, fake_api, llm_config):
+        """Spec: llm_calls stores seed and reasoning_effort on a miss and on a hit."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=42, reasoning_effort="low")
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=42, reasoning_effort="low")
+        rows = call_rows(llm_config)
+        assert [r["cached"] for r in rows] == [0, 1]
+        assert [r["seed"] for r in rows] == [42, 42]
+        assert [r["reasoning_effort"] for r in rows] == ["low", "low"]
+
+    def test_unset_seed_and_effort_are_stored_as_null(self, fake_api, llm_config):
+        """Spec: seed and reasoning_effort are NULL in both tables when not sent."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config)
+        cache_row = cache_rows(llm_config)[0]
+        call_row = call_rows(llm_config)[0]
+        assert cache_row["seed"] is None and cache_row["reasoning_effort"] is None
+        assert call_row["seed"] is None and call_row["reasoning_effort"] is None
+
+    def test_seed_zero_is_stored_as_zero_not_null(self, fake_api, llm_config):
+        """Spec: seed=0 is a real value and must not be stored as NULL."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=0)
+        assert cache_rows(llm_config)[0]["seed"] == 0
+        assert call_rows(llm_config)[0]["seed"] == 0
+
+    def test_failed_call_logs_seed_and_reasoning_effort(self, fake_api, llm_config):
+        """Spec: a failed call still logs its request parameters in llm_calls."""
+        fake_api.reply = make_reply(text="")
+        with pytest.raises(LLMOutputError):
+            generate(PROMPT, MODEL, 0.0, config=llm_config, seed=7, reasoning_effort="high")
+        row = call_rows(llm_config)[0]
+        assert row["seed"] == 7 and row["reasoning_effort"] == "high"
+        assert row["error"].startswith("LLMOutputError")
+
+
+class TestSeedAndReasoningEffortRequest:
+    def test_generate_passes_seed_and_effort_to_call_api(self, fake_api, llm_config):
+        """Spec: generate() passes seed and reasoning_effort on to _call_api."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config, seed=42, reasoning_effort="low")
+        call = fake_api.calls[0]
+        assert call["seed"] == 42
+        assert call["reasoning_effort"] == "low"
+
+    def test_generate_defaults_pass_none_to_call_api(self, fake_api, llm_config):
+        """Spec: seed and reasoning_effort default to None (keyword-only, optional)."""
+        generate(PROMPT, MODEL, 0.0, config=llm_config)
+        call = fake_api.calls[0]
+        assert call["seed"] is None
+        assert call["reasoning_effort"] is None
+
+    def test_send_request_sends_seed_and_effort_when_set(self):
+        """Spec: seed and reasoning_effort are put in the request when not None."""
+        fake = FakeOpenAIClient()
+        client._send_request(fake, "p", MODEL, 0.0, None, seed=42, reasoning_effort="low")
+        kwargs = fake.create_kwargs[0]
+        assert kwargs["seed"] == 42
+        assert kwargs["reasoning_effort"] == "low"
+
+    def test_send_request_omits_seed_and_effort_when_none(self):
+        """Spec: with None, neither field is in the request (not sent as null)."""
+        fake = FakeOpenAIClient()
+        client._send_request(fake, "p", MODEL, 0.0, None)
+        kwargs = fake.create_kwargs[0]
+        assert "seed" not in kwargs, "seed=None must not be sent"
+        assert "reasoning_effort" not in kwargs, "reasoning_effort=None must not be sent"
+
+    def test_send_request_sends_seed_zero(self):
+        """Spec: only None means 'not sent'; seed=0 must be sent."""
+        fake = FakeOpenAIClient()
+        client._send_request(fake, "p", MODEL, 0.0, None, seed=0)
+        assert fake.create_kwargs[0]["seed"] == 0
+
+    def test_send_request_sends_only_the_one_that_is_set(self):
+        """Spec: each field is sent independently of the other."""
+        fake = FakeOpenAIClient()
+        client._send_request(fake, "p", MODEL, 0.0, None, reasoning_effort="high")
+        client._send_request(fake, "p", MODEL, 0.0, None, seed=5)
+        first, second = fake.create_kwargs
+        assert first["reasoning_effort"] == "high" and "seed" not in first
+        assert second["seed"] == 5 and "reasoning_effort" not in second
+
+    def test_call_api_passes_seed_and_effort_to_send_request(self, monkeypatch, llm_config):
+        """Spec: _call_api takes seed and reasoning_effort (keyword, default None) and forwards both."""
+        seen = []
+
+        def recording_send(client_obj, prompt, model, temperature, schema,
+                           seed=None, reasoning_effort=None):
+            """Record the forwarded seed and reasoning_effort, then return a reply."""
+            seen.append((seed, reasoning_effort))
+            return make_reply()
+
+        monkeypatch.setattr(client, "_get_client", lambda base_url, timeout_s: object())
+        monkeypatch.setattr(client, "_send_request", recording_send)
+        client._call_api(PROMPT, MODEL, 0.0, None, llm_config, CallStats(),
+                         seed=9, reasoning_effort="low")
+        client._call_api(PROMPT, MODEL, 0.0, None, llm_config, CallStats())
+        assert seen == [(9, "low"), (None, None)]
 
 
 # ---------------------------------------------------------------- layering

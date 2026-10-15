@@ -438,14 +438,16 @@ Step-specific:
 ## Carry-forward to later steps (from the 2026-10-15 code review)
 These came out of the Step 2 review and belong to later steps. Each later
 spec must address the ones for its step.
-- **Step 3:** decide `seed` and `reasoning_effort` (thinking level) for the
+- **Step 3 (done in Step 3: generator `seed` 42, `reasoning_effort` null; in the
+  cache key and both tables; judge values decided in Step 7):** decide `seed` and `reasoning_effort` (thinking level) for the
   generator and judge; take them from config, send them, and add them to the
   cache key and stored row. *Decision for Gaurav.*
-- **Step 3:** context window. The `/v1` endpoint cannot set `num_ctx`.
+- **Step 3 (done in Step 3: `max_prompt_tokens` 3500 guard, `ContextLimitError`
+  also when prompt_tokens is not reported):** context window. The `/v1` endpoint cannot set `num_ctx`.
   Decide how the context limit is guaranteed, add a per-model
   `context_limit` to config, and flag answers whose `prompt_tokens` come
   close to it (`truncation_suspected`) instead of scoring them silently.
-- **Step 3:** `answer()["latency_ms"]` must come from `model_latency_ms`
+- **Step 3 (done in Step 3):** `answer()["latency_ms"]` must come from `model_latency_ms`
   (plus retrieval time), never from the wall-time `latency_ms`.
 - **Step 5:** obtain each model's identity (Ollama digest where available),
   pass it to `generate(..., model_digest=...)` so it enters the cache key and
