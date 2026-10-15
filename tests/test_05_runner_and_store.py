@@ -176,7 +176,7 @@ class TestConnect:
                  "system_json", "n_queries", "n_ok", "n_failed", "llm_calls_start_id",
                  "llm_calls_json"},
         "outputs": {"run_id", "query_id", "answer", "retrieved_chunks_json", "latency_ms", "error"},
-        "scores": {"run_id", "query_id", "metric", "value", "reasoning"},
+        "scores": {"run_id", "query_id", "metric", "version", "value", "reasoning", "scored_at"},
         "reviews": {"run_id", "query_id", "flag_reasons", "human_label", "notes"},
     }
 

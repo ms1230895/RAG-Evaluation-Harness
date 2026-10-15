@@ -12,3 +12,30 @@ system:
   answer: rag.pipeline:answer                   # the contract: answer(question, config) -> dict
   load_config: rag.pipeline:load_pipeline_config  # reads and checks the --config YAML
   describe: rag.pipeline:describe_system        # optional run metadata; null = none
+
+# Deterministic checks and retrieval metrics (Step 6). Values approved by
+# Gaurav on 2026-10-15; starting defaults, not tuned values. scores.version is
+# computed from hit_ks + refusal_phrases, so changing either gives a new version.
+checks:
+  hit_ks: [1, 4]               # hit@k per k; NULL when a run retrieved fewer than k chunks
+  report_confidence: 0.95      # Wilson interval level (CLAUDE.md: 95%); not part of the version
+  refusal_phrases:             # lowercase substrings of the normalised answer; first match is stored
+    - "no mention of"
+    - "does not mention"
+    - "doesn't mention"
+    - "no information"
+    - "does not specify"
+    - "doesn't specify"
+    - "does not provide"
+    - "doesn't provide"
+    - "not provided in the"
+    - "does not contain"
+    - "doesn't contain"
+    - "cannot find"
+    - "can't find"
+    - "unable to find"
+    - "i don't know"
+    - "i do not know"
+    - "cannot answer"
+    - "can't answer"
+    - "unable to answer"
