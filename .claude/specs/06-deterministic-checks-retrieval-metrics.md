@@ -317,7 +317,7 @@ for the rule.
 ## Files to create
 - `evalharness/metrics.py`
 - `evalharness/checks.py`
-- `tests/test_06_checks_and_retrieval_metrics.py`
+- `tests/test_06_deterministic_checks_retrieval_metrics.py`
 
 ## Files to change
 - `evalharness/store.py`: new `scores` schema plus the guarded migration;
@@ -339,7 +339,7 @@ No new dependencies (`numpy` and `scipy` are already approved and installed;
 `hashlib`, `json`, `re`, `sqlite3` are standard library).
 
 ## Tests
-`tests/test_06_checks_and_retrieval_metrics.py`, all offline. No LLM, no
+`tests/test_06_deterministic_checks_retrieval_metrics.py`, all offline. No LLM, no
 embedding, no network. It uses tmp DBs only and never `data/results.sqlite`.
 Every expected number is computed by hand in a comment.
 
@@ -494,7 +494,7 @@ All resolved on 2026-10-15; Gaurav accepted every recommendation:
       refusals) and either accepted the phrase list or changed it (Decision 4).
 - [ ] Layering: `grep -rnE "^(import|from) (rag|llm)" evalharness/checks.py evalharness/metrics.py`
       prints nothing, and `grep -rn "evalharness" rag/` prints nothing.
-- [ ] `pytest tests/test_06_checks_and_retrieval_metrics.py` passes with no
+- [ ] `pytest tests/test_06_deterministic_checks_retrieval_metrics.py` passes with no
       network access.
 - [ ] `pytest` passes (whole suite).
 - [ ] The Progress section of CLAUDE.md has a Step 6 entry with the version,
