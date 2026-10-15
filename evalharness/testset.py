@@ -321,13 +321,25 @@ def _show(query: Query, docs_dir: Path) -> None:
         print((docs_dir / f"{doc_id}.md").read_text(encoding="utf-8").rstrip())
 
 
+# Typed at a source_doc_ids prompt to mean "no source docs" (unanswerable).
+NO_SOURCES = "-"
+
+
+def _parse_doc_ids(raw: str) -> list[str]:
+    """Comma-separated doc IDs -> list. NO_SOURCES ("-") -> [] (no source docs)."""
+    if raw.strip() == NO_SOURCES:
+        return []
+    return [d.strip() for d in raw.split(",") if d.strip()]
+
+
 def _edit(query: Query, input_fn) -> Query | None:
     """Ask for one field and its new value; return the re-validated query,
     or None if the edit is rejected.
 
-    source_doc_ids is typed comma-separated. Editing `type` also asks for
-    source_doc_ids (Enter keeps them), because changing a lookup to
-    unanswerable needs both changed at once to stay valid.
+    source_doc_ids is typed comma-separated, or "-" for no source docs.
+    Editing `type` also asks for source_doc_ids (Enter keeps them, "-"
+    clears them), because changing a lookup to unanswerable, or back, needs
+    both changed at once to stay valid.
     """
     field = input_fn(f"field to edit ({', '.join(EDITABLE_FIELDS)}) > ").strip()
     if field not in EDITABLE_FIELDS:
@@ -336,15 +348,17 @@ def _edit(query: Query, input_fn) -> Query | None:
 
     data = query.model_dump()
     print(f"Current {field}: {data[field]}")
-    raw = input_fn("new value > ")
     if field == "source_doc_ids":
-        data[field] = [d.strip() for d in raw.split(",") if d.strip()]
+        raw = input_fn(f"new value (comma-separated, '{NO_SOURCES}' for none) > ")
+        data[field] = _parse_doc_ids(raw)
     else:
-        data[field] = raw.strip()
+        data[field] = input_fn("new value > ").strip()
     if field == "type":
-        raw_docs = input_fn("source_doc_ids, comma-separated (Enter keeps current) > ")
+        raw_docs = input_fn(
+            f"source_doc_ids, comma-separated ('{NO_SOURCES}' for none, Enter keeps current) > "
+        )
         if raw_docs.strip():
-            data["source_doc_ids"] = [d.strip() for d in raw_docs.split(",") if d.strip()]
+            data["source_doc_ids"] = _parse_doc_ids(raw_docs)
 
     try:
         return Query.model_validate(data)

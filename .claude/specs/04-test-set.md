@@ -157,7 +157,9 @@ def review(queries: list[Query], path, docs_dir, input_fn=input) -> list[Query]:
     in id order: print id, type, question, reference answer, source doc IDs
     and the full text of each source doc. Keys: [a]ccept -> reviewed=True;
     [e]dit -> choose field (question, reference_answer, type,
-    source_doc_ids), enter new value, re-validate, show again;
+    source_doc_ids), enter new value, re-validate, show again.
+    source_doc_ids is typed comma-separated, "-" means none; editing type
+    also asks for source_doc_ids (Enter keeps them, "-" clears them);
     [d]elete -> remove (id retired); [g]rep -> search the corpus for a
     word; [s]kip; [q]uit. Saves after every
     change with save_test_set. Only a key pressed by the person sets
@@ -294,6 +296,11 @@ Review tool (`input_fn` fake that returns scripted keys)
   with sources) is rejected and the query is unchanged.
 - `test_review_delete_and_quit`: deleted id is gone from the saved file;
   quit saves what was done so far.
+- `test_review_edit_type_to_unanswerable_clears_sources`: `e`, `type`,
+  `unanswerable`, `-` turns a lookup into a valid unanswerable query with
+  `source_doc_ids == []`.
+- `test_review_edit_source_doc_ids_multiple_and_none`: `a, b` gives two
+  IDs; `-` gives `[]` (rejected for a lookup, query unchanged).
 - `test_review_grep_prints_matches`: `g` then a word prints the matching
   corpus lines (whole word, any case) and changes nothing in the file.
 
