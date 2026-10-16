@@ -1328,3 +1328,35 @@ def experiment_db(baseline_db):
     fields.update(exp_run_id=exp_run_id, exp_cases=list(_EXPERIMENT_CASES), add_run=add_run,
                   add_simple_run=add_simple_run, set_exp_score=set_exp_score)
     return SimpleNamespace(**fields)
+
+
+# ---------------------------------------------------------------- Step 15: dashboard
+
+@pytest.fixture
+def dashboard_db(experiment_db):
+    """`experiment_db` plus 3 flagged `reviews` rows on the experiment run and 2 claims for q005.
+
+    Namespace = the experiment_db namespace plus `.flagged` (the three flagged query ids of
+    "run-exp-001"). Flags (all human_label NULL): q001 ["answer_changed"], q003 ["ungrounded"],
+    q005 ["low_relevance", "ungrounded"]. q005 has two judge_claims rows under the faithfulness
+    version (claim 0 supported, claim 1 contradicted). Chunk of every output: leave_policy#000,
+    score 0.5, text "Some chunk text.". Baseline run has no flags.
+    """
+    from types import SimpleNamespace
+
+    from evalharness import store
+
+    conn, run_id = experiment_db.conn, experiment_db.exp_run_id
+    store.write_flag_rows(conn, run_id, {"q001": ["answer_changed"], "q003": ["ungrounded"],
+                                         "q005": ["low_relevance", "ungrounded"]})
+    with conn:
+        conn.executemany(
+            "INSERT INTO judge_claims (run_id, query_id, version, claim_index, claim, label,"
+            " reasoning) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(run_id, "q005", experiment_db.versions["faithfulness"], 0, "CLAIM-ZERO",
+              "supported", "claim reasoning zero"),
+             (run_id, "q005", experiment_db.versions["faithfulness"], 1, "CLAIM-ONE",
+              "contradicted", "claim reasoning one")])
+    fields = dict(vars(experiment_db))
+    fields["flagged"] = ["q001", "q003", "q005"]
+    return SimpleNamespace(**fields)
