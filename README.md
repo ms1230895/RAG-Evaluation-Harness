@@ -88,7 +88,7 @@ The flag rate is review workload, not a quality number: it depends on which two 
 **Not supported**
 - *"The change is a proven improvement."* On dev the exact paired p of the chosen change is above 0.05, the noise control (same config, only the sampling seed changed) already moved the count on its own, and the chosen config was the best of 12 dev looks with no multiple-comparison correction, so its dev rate is optimistic. On the 20 held-out queries the verdict is `not_distinguishable`: one answer separates the two runs.
 - *"The rates are the true share of hallucinated answers."* The judges are uncalibrated. The calibration comparison had zero positive cases on both sides, so it says nothing about whether the judges detect an ungrounded answer.
-- *The CV draft.* The author's CV draft figures (an ungrounded rate falling from 25% to 12%, and 10-15% of answers flagged for review) were hypotheses, not targets, and no stored run supports them. The measured baseline is already far below 25% (see the table), and the flag rate in the stored regression checks is a review-workload figure that depends on which two runs are compared. The CV follows the measurements in this README, not the other way round.
+- *The CV draft.* The author's CV draft figures (an ungrounded rate falling from 25% to 12%, and 10-15% of answers flagged for review) were hypotheses, not targets, and no stored run supports them. Against that hypothesis, the measured baseline is already far below 25% (see the table), and the flag rate in the stored regression checks is a review-workload figure that depends on which two runs are compared, so it says nothing about a 10-15% target. The CV follows the measurements in this README, not the other way round.
 
 ## 3. Architecture
 
