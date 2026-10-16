@@ -45,13 +45,13 @@ def load_writeup_config(harness: dict) -> dict:
 def build_results(conn, harness: dict) -> dict:
     """Everything the block needs, read from run_reports / calibration_reports / accepted_runs:
     baseline (kind baseline, the v0 dev run), experiments (the 12 kind experiment rows whose config is not the baseline config, in run order; the v0 twin check is shown as a one-line reproducibility note, not as an experiment),
-    heldout (the kind heldout report), calibration (per judge, via report._calibration_status),
+    heldout (the kind heldout report), regression (the stored Step 13 checks, one per run / reference / flag version), calibration (per judge, via report._calibration_status),
     accepted run id. Raises WriteupRefused when baseline, experiments or heldout is missing."""
 
 def format_results_markdown(results: dict) -> str:
     """The block body: headline (before -> after, dev and held-out, with CIs and judge status),
     experiment table (variable, ungrounded k/n with CI, change in points, improved/regressed, exact p,
-    false refusals), calibration status table. Every rate goes through report._fmt_rate_pct."""
+    false refusals), stored regression checks (gate, ungrounded change, flag rate, flag reasons), calibration status table. Every rate goes through report._fmt_rate_pct."""
 
 def replace_block(readme_text: str, block_body: str) -> str:
     """readme_text with the text between the two markers replaced; everything else byte-identical.
@@ -168,7 +168,7 @@ Step-specific rules:
 - [ ] "Done when" from CLAUDE.md: someone new could understand and reproduce the project from the README. Checked by following the README in a fresh `git clone` in a scratch folder as in Decision 5: every documented offline command runs and its output matches what the README says; each command that needs a model is labelled as such; the README states what will differ. Record the exact commands and outputs.
 - [ ] `python -m evalharness.writeup check` exits 0 on the real database, and `python -m evalharness.writeup update` run twice leaves `git diff --stat` empty the second time.
 - [ ] SQL / file check: `outputs`, `scores`, `runs`, `judge_claims`, `reviews`, `run_reports` row counts and `data/results.sqlite` unchanged before and after (`writeup` is read-only on the database).
-- [ ] `grep -n "25%\|12%" README.md` shows each occurrence inside a sentence that also says "hypothesis"; `grep -nE "sk-|api_key *=|Bearer " README.md .env.example` finds nothing.
+- [ ] `grep -nP "(?<![\d.])(25|12)%|10-15%" README.md` shows each occurrence inside a sentence that also says "hypothes" (a plain `grep "25%"` also matches table cells such as 6.25%); `grep -nE "sk-|api_key *=|Bearer " README.md .env.example` finds nothing.
 - [ ] Every headline number in the README equals the stored report string: baseline `8.75% [4.30%, 16.98%] (7/80)`, chosen config dev `2.50% [0.69%, 8.66%] (2/80)`, held-out v0 `10.00% [2.79%, 30.10%] (2/20)` and chosen `5.00% [0.89%, 23.61%] (1/20)`, held-out verdict `not_distinguishable` (verify by `writeup render` and by SQL on `run_reports`).
 - [ ] `python -m pytest tests/test_16_readme_and_writeup.py -q` and the full `pytest` pass.
 - [ ] `git status --porcelain` shows no database, index, cache or `.env` file; `.env.example` is tracked.
