@@ -32,8 +32,8 @@ A full evaluation today is five separate commands: `runner`, `checks`, `judges f
 ```python
 STAGES = ("run", "checks", "faithfulness", "relevance", "gate")
 
-def preflight(config_path: str, split: str, harness: dict, *, gate: bool,
-              allow_dirty: bool) -> list[str]:
+def preflight_run(config_path: str, split: str, harness: dict, auto: dict, *, gate: bool,
+                  allow_dirty: bool) -> list[str]:
     """Problems found WITHOUT any LLM call, empty list if none. Checks: split in
     automation.allowed_splits (never heldout); config file loads through the system's
     load_config; git tree clean unless allow_dirty; judge configs load; judge model != the
