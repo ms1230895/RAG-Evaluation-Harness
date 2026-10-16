@@ -301,7 +301,8 @@ def _format_calls(summary: dict) -> str:
                      f"{c['errors']} errors" for model, c in summary.items())
 
 
-def main(argv: list[str] | None = None) -> int:
+def run(argv: list[str] | None = None) -> tuple[int, str | None]:
+    """Run one split; return (exit code, run_id). run_id is None when the run was refused."""
     parser = argparse.ArgumentParser(prog="python -m evalharness.runner",
                                      description="Run one test-set split and store every output.")
     parser.add_argument("--config", required=True, help="pipeline config YAML, e.g. configs/v0.yaml")
@@ -316,9 +317,9 @@ def main(argv: list[str] | None = None) -> int:
     # warnings (e.g. retries) still show.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
-    def refuse(problem: str) -> int:
+    def refuse(problem: str) -> tuple[int, None]:
         print(f"error: {problem}", file=sys.stderr)
-        return 1
+        return 1, None
 
     # Every check below happens before anything is written to the results DB.
     try:
@@ -375,14 +376,19 @@ def main(argv: list[str] | None = None) -> int:
                             "system_info": system_info},
                   max_consecutive_failures=harness["max_consecutive_failures"],
                   error_max_chars=harness["error_max_chars"], llm_config=llm_config)
-        run = store.get_run(conn, run_id)
+        run_row = store.get_run(conn, run_id)
 
-    print(f"run {run_id}: {run['status']} | {run['n_queries']} queries, {run['n_ok']} ok, "
-          f"{run['n_failed']} failed | {_format_calls(json.loads(run['llm_calls_json']))} | "
+    print(f"run {run_id}: {run_row['status']} | {run_row['n_queries']} queries, {run_row['n_ok']} ok, "
+          f"{run_row['n_failed']} failed | {_format_calls(json.loads(run_row['llm_calls_json']))} | "
           f"db {harness['db_path']}")
-    if run["note"]:
-        print(f"note: {run['note']}")
-    return 0 if run["status"] == "completed" else 2
+    if run_row["note"]:
+        print(f"note: {run_row['note']}")
+    return (0 if run_row["status"] == "completed" else 2), run_id
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: the exit code of run()."""
+    return run(argv)[0]
 
 
 if __name__ == "__main__":
