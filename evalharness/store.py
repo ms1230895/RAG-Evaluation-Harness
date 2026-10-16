@@ -661,3 +661,9 @@ def write_review(conn: sqlite3.Connection, run_id: str, query_id: str, human_lab
         ).rowcount
     if updated != 1:
         raise ValueError(f"no flagged review row for {run_id} / {query_id}")
+
+
+def runs_with_reviews(conn: sqlite3.Connection) -> list[str]:
+    """Run ids that have at least one `reviews` row (a flagged answer), in id order."""
+    rows = conn.execute("SELECT DISTINCT run_id FROM reviews ORDER BY run_id").fetchall()
+    return [row["run_id"] for row in rows]

@@ -53,8 +53,9 @@ def compare_two(conn, base_run_id: str, new_run_id: str, versions: dict, cfg: di
                 regression_cfg: dict) -> dict:
     """experiments.compare_runs(...) plus "changed_answers": [{"query_id", "similarity",
     "answer_base", "answer_new"}] for queries whose word similarity is below
-    regression.answer_similarity_below, plus "same_versions": bool and "judge_label" per judge.
-    Refusals (different split / test set / queries) are raised as ExperimentRefused."""
+    regression.answer_similarity_below, plus "similarity_threshold". compare_runs already
+    returns "judge_label" per judge. Refusals (same run, different split / test set / queries)
+    are raised as ExperimentRefused."""
 
 def review_queue(conn, run_id: str, versions: dict) -> list[dict]:
     """Every `reviews` row of the run, joined with question, type, reference_answer, answer,
@@ -63,6 +64,11 @@ def review_queue(conn, run_id: str, versions: dict) -> list[dict]:
 
 def review_progress(conn, run_id: str) -> dict:
     """{"flagged": N, "reviewed": k, "ok": a, "bad": b} for the run."""
+
+def stored_gate_results(conn, run_id: str) -> list[dict]   # verdicts already stored in run_reports
+def judge_labels(conn, run_id, versions) -> dict[str, str]  # "calibrated judge" | "uncalibrated judge"
+def scorer_versions(harness: dict) -> dict[str, str]        # report.current_versions
+def load_dashboard_config(harness: dict) -> dict            # validates the `dashboard:` block
 ```
 
 ### `dashboard/figures.py` (new; Plotly only, no `streamlit` import)
@@ -92,7 +98,10 @@ def runs_with_versions(conn, versions: list[str]) -> set[str]
 def get_queries(conn, query_ids: list[str]) -> dict[str, dict]
     # question, type, reference_answer, source_doc_ids, split per id (reference answer is needed
     # by the queue; get_outputs_with_queries does not return it)
-def write_review(conn, run_id, query_id, human_label: str, notes: str | None, labeler: str) -> None
+def runs_with_reviews(conn) -> list[str]
+    # run ids that have at least one reviews row (the review page's run selector)
+def write_review(conn, run_id, query_id, human_label: str, notes: str | None, labeler: str,
+                 allowed_labels: list[str]) -> None
     # UPDATEs only an EXISTING reviews row (a flagged answer), sets human_label ('ok' | 'bad'),
     # notes, labeler, reviewed_at = now; ValueError for another label or a missing row.
     # Never touches flag_reasons, scores or outputs.
