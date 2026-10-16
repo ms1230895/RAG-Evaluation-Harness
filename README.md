@@ -142,7 +142,7 @@ Gitignored, so **absent from a clone**: `.env`, `data/*.sqlite` (results and LLM
 
 ## 5. Setup and reproduce
 
-Commands marked *(needs Ollama)* call a local or cloud model. The author ran the offline commands in a fresh clone (see below); installing Ollama and signing in were done on the author's machine and were not repeated on a clean one.
+Commands marked *(needs Ollama)* call a local or cloud model. In a fresh `git clone` (a scratch folder with no database, cache or index, using the author's existing virtual environment) the author ran `python -m pytest`, `python -m evalharness.testset summary`, `python -m rag.loader` and the one-question command below, and all worked; `python -m evalharness.writeup check` refused there, as expected. A clean `pip install -r requirements.txt` into a new environment, installing Ollama and signing in were **not** repeated on a clean machine.
 
 **Prerequisites**
 - Python 3.13 and `git`.
@@ -168,7 +168,7 @@ python -m rag.loader                      # the 22 documents load with stable id
 ```bash
 python -m rag.pipeline --config configs/v0.yaml --question "How many casual leaves do interns get?"
 ```
-It prints the answer, the retrieved chunks with scores and the latency.
+It prints the answer, the retrieved chunks with scores and the latency. On a fresh clone the first call builds the FAISS index (66 chunks, a few seconds) and makes one generator call; in the author's check the top-ranked chunk was `intern_leave_policy#000`.
 
 **Pin your model digests (needed once on a new machine).** The configs pin the digest of each Ollama model build, and a run refuses to start if the server reports another one. Read yours with `curl -s http://localhost:11434/api/tags`, copy the full `digest` of each model, and update `generation.model_digest` in the pipeline configs and `model_digest` in `configs/judges.yaml` (faithfulness and relevance blocks). For `-cloud` models the digest identifies the local manifest, not the remote weights. Editing a config changes the SHA-256 pinned in `configs/heldout.yaml`, which is the point: see "Held-out" below.
 
