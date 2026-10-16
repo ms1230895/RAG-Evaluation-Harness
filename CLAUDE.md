@@ -99,7 +99,7 @@ Do NOT use:
 ## Repo layout
 ```
 rag-eval/
-  CLAUDE.md  README.md  requirements.txt  .env  .gitignore
+  CLAUDE.md  README.md  requirements.txt  .env  .env.example  .gitignore
   data/
     docs/               # HR corpus, one file per document, stable doc IDs
     test_set.jsonl
@@ -107,11 +107,13 @@ rag-eval/
   llm/
     client.py           # shared cached LLM client (generator + judges)
   rag/
-    chunker.py  embedder.py  index.py  retriever.py  pipeline.py
+    chunker.py  embedder.py  index.py  retriever.py  pipeline.py  loader.py
+    bm25.py  reranker.py  rerank_worker.py  rewriter.py   # Step 11 experiment knobs
   evalharness/
     schemas.py  store.py  runner.py
     checks.py  judges.py  metrics.py  calibration.py  regression.py  cli.py
-  dashboard/app.py
+    testset.py  report.py  experiments.py  heldout.py  dashboard_data.py  writeup.py
+  dashboard/app.py  views.py  figures.py
   experiments/log.md
   tests/
 ```
@@ -275,3 +277,10 @@ Then ask me: do I have HR documents from my earlier chatbot project, or should y
   - Done-when check (real `data/results.sqlite`, read-only except the two reviews below): 16 eligible dev runs and 2 held-out runs; excluded `20261015T152824Z-v0-59c05048` (never scored). Breakdown of `20261015T152638Z-v0-c7c96975`: ungrounded all 7/80, lookup 1/40, multi_chunk 4/16, paraphrased 2/12, unanswerable 0/12 (same as Steps 7 and 10). Compare accepted run `20261015T220912Z-v1_prompt_citations-23b6da7c` (A) with it (B): ungrounded 2 vs 7 of 80, improved 0, regressed 5, exact p = 0.0625 (same as Step 13). Review page: Gaurav labelled 2 of the 9 flagged rows himself, on run `20261016T001502Z-v1_prompt_citations-313fd732`: q053 (`low_relevance`) `ok` and q057 (`ungrounded`) `ok`, labeler gaurav, 2026-10-16T02:53 UTC; 0 `bad`. `outputs` 1400, `scores` 17175, `runs` 19, `judge_claims` 2446 unchanged; `reviews` 9 rows.
   - **What this means:** the dashboard shows the stored numbers; it does not make them better evidence. Both judges are still uncalibrated (Step 9 inconclusive), per-type n is 12-16, and the review labels so far (2, both `ok`, on flagged answers only) say nothing about flag recall and are not calibration labels. Held-out runs are displayed, never used for tuning. Streamlit prints a hint to install `watchdog` (faster reload); not added (not an approved library).
   - Tests: `tests/test_15_streamlit_dashboard.py` 55 items (rag-test-writer from the spec; tmp DBs, `AppTest` pages, `generate` patched to raise), plus a `dashboard_db` fixture; `tests/test_05_runner_and_store.py` `reviews` column set updated. Full suite 2128 passed. `/code-review` not run.
+- **Step 16 (done, 2026-10-16):** README and write-up. Spec `.claude/specs/16-readme-and-write-up.md`. The `answer()` contract, `rag/`, `llm/`, judges, metrics, thresholds, dashboard and every pipeline config are unchanged; no LLM call except one uncached generator call in the fresh-clone check.
+  - New: `README.md` (rewritten, 14 sections: results at a glance, what the results support and do not, architecture, layout, setup and reproduce, metric definitions with formulas, method, experiments, judge calibration, regression/gate, dashboard, limitations, design decisions, troubleshooting), `evalharness/writeup.py` (`python -m evalharness.writeup render | update | check`; builds the README results block between two markers from the stored `run_reports` and the live calibration status; read-only on the database, writes only between the markers; exit 0 matches, 1 differs, 2 refused), `.env.example` (dummy key), `store.list_run_reports`, `writeup:` block in `configs/harness.yaml`. The "Repo layout" block above was brought in line with the tree.
+  - Decisions (Gaurav, all recommendations): generated block plus `check`; publish with calibration inconclusive; skip the RAGAS cross-check (needs an unapproved package); README only; fresh-clone check = offline steps plus one real question; CV section included; no screenshots, badges or licence; `.env.example` added.
+  - Done-when check (real database, nothing re-run): `writeup check` exit 0 (baseline run `20261015T152638Z-v0-c7c96975`, 12 experiments, held-out runs `20261015T233336Z-v0-9ff3bd9f` and `20261015T233407Z-v1_prompt_citations-84777159`); `update` twice leaves the README and `data/results.sqlite` bytes unchanged; row counts unchanged (outputs 1400, scores 17175, runs 19, judge_claims 2446, reviews 9, run_reports 18). README headline strings equal the stored reports: baseline dev `8.75% [4.30%, 16.98%] (7/80)`, chosen `configs/v1_prompt_citations.yaml` dev `2.50% [0.69%, 8.66%] (2/80)` (improved 5, regressed 0, exact p 0.0625), held-out v0 `10.00% [2.79%, 30.10%] (2/20)` and chosen `5.00% [0.89%, 23.61%] (1/20)`, verdict `not_distinguishable` (improved 1, regressed 0, p 1.0000). Both judges "uncalibrated" in the README (Step 9: n = 20, TP 0 FP 0 FN 0 TN 20).
+  - Fresh clone (scratch folder, no database, cache or index, the author's existing venv): `pytest` 2128 passed (before this step's tests), `evalharness.testset summary` READY, `rag.loader` 7178 words, `writeup check` exit 2 (no database, expected), and one real `rag.pipeline` question built the same 66-chunk index (`b818ed7d…`) with 1 uncached `gemma4:31b-cloud` call (887 prompt / 41 completion tokens) and the same top-4 chunks and scores as Step 3. NOT repeated: a clean `pip install` into a new environment, installing Ollama and signing in on a clean machine, and a full evaluation run in the clone.
+  - **What this means:** the README makes every number traceable and states that the CV hypothesis (25% -> 12%, 10-15% flagged) is not supported by any stored run. It does not make the numbers better evidence: judges remain uncalibrated, the chosen change is not distinguishable from v0 on held-out, and the stored numbers cannot be re-created exactly on another machine (cloud models, gitignored database and cache). CI cannot run `writeup check` (no database).
+  - Tests: `tests/test_16_readme_and_write_up.py` 48 items (rag-test-writer from the spec; `experiment_db` fixture, tmp DBs, `generate` patched to raise). First run 47 passed / 1 failed: a README sentence had `25%` without the word "hypothesis"; the README wording was fixed (the test, which follows the spec, was not changed). Full suite 2176 passed. `/code-review` not run.

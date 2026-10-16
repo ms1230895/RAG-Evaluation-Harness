@@ -667,3 +667,15 @@ def runs_with_reviews(conn: sqlite3.Connection) -> list[str]:
     """Run ids that have at least one `reviews` row (a flagged answer), in id order."""
     rows = conn.execute("SELECT DISTINCT run_id FROM reviews ORDER BY run_id").fetchall()
     return [row["run_id"] for row in rows]
+
+
+def list_run_reports(conn: sqlite3.Connection, kind: str) -> list[dict]:
+    """Every stored run report of one kind, oldest first; `versions` and `report` are parsed JSON."""
+    rows = conn.execute("SELECT * FROM run_reports WHERE kind = ? ORDER BY id", (kind,)).fetchall()
+    reports = []
+    for row in rows:
+        item = dict(row)
+        item["versions"] = json.loads(item.pop("versions_json"))
+        item["report"] = json.loads(item.pop("report_json"))
+        reports.append(item)
+    return reports

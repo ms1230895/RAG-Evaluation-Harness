@@ -82,3 +82,8 @@ dashboard:
   show_heldout: true           # show the separate, read-only held-out table on the trends page
   excerpt_chars: 400           # display only: answers / chunks longer than this are expandable
   review_labels: [ok, bad]     # the only values the review buttons can write
+
+# README write-up (Step 16): `python -m evalharness.writeup render | update | check`.
+# The results block of the README is generated from the stored run_reports between two markers.
+writeup:
+  readme_path: README.md       # file `update` / `check` read, relative to the repo root
