@@ -128,10 +128,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(regression, "main", fake_gate)
     monkeypatch.setattr(regression, "load_regression_config", lambda h: {})
     monkeypatch.setattr(regression, "get_accepted_run", lambda conn, split: e.accepted)
-    monkeypatch.setattr(cli, "current_versions", lambda h: {})
-    monkeypatch.setattr(cli, "item_table",
-                        lambda conn, run_id, versions: [{"faith_state": "judged",
-                                                         "rel_state": "judged"}] * 3)
 
     conn = store.connect(db_path)
     _add_run(conn, RUN_ID)
@@ -262,7 +258,8 @@ def test_run_all_stages_ok_calls_in_order_passes_run_id_and_exits_0(env, capsys)
         assert argv[argv.index("--run-id") + 1] == RUN_ID
     out = capsys.readouterr().out
     assert RUN_ID in out
-    assert "3 judged, 0 judge failed" in out
+    for stage in ("faithfulness", "relevance"):   # counts come from stored rows; fake judges store none
+        assert f"stage {stage}" in out
 
 
 def test_run_passes_harness_config_to_every_stage(env):
@@ -513,3 +510,26 @@ def test_cli_py_imports_nothing_from_rag_or_llm_directly():
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             imported.add(node.module.split(".")[0])
     assert not imported & {"rag", "llm"}
+
+
+def test_coverage_reads_only_the_named_judges_rows(env):
+    """Regression (found by the first real run): right after the faithfulness stage the
+    relevance rows do not exist yet, so the status line must not need all three scorers."""
+    rows = [("q001", "faithfulness", 1.0, "faithfulness 1.00 >= 0.8"),
+            ("q002", "faithfulness", None, "judge failed: boom"),
+            ("q003", "faithfulness", None, "not judged: failed output")]
+    with env.conn:
+        for query_id in ("q001", "q002", "q003"):
+            env.conn.execute("INSERT OR IGNORE INTO queries (id, question, type, reference_answer,"
+                             " source_doc_ids, split, reviewed) VALUES (?, 'q', 'lookup', 'r', ?,"
+                             " 'dev', 1)", (query_id, '["leave_policy"]'))
+        for query_id, metric, value, reasoning in rows:
+            env.conn.execute(
+                "INSERT INTO scores (run_id, query_id, metric, version, value, reasoning, scored_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, '2026-10-16T00:00:00+00:00')",
+                (RUN_ID, query_id, metric, env.versions["faithfulness"], value, reasoning))
+    text = cli._coverage(env.harness, RUN_ID, "faithfulness")
+    assert text == "1 judged, 1 judge failed, 1 not judged"
+    # No relevance rows at all: still answers instead of raising.
+    assert cli._coverage(env.harness, RUN_ID, "relevance") == "0 judged, 0 judge failed, 0 not judged"
+

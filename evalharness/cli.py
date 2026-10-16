@@ -31,7 +31,6 @@ from collections import Counter
 from contextlib import closing
 
 from evalharness import checks, judges, regression, runner, store
-from evalharness.report import current_versions, item_table
 from evalharness.runner import DEFAULT_HARNESS_CONFIG, load_harness_config
 
 AUTOMATION_KEYS = {"allowed_splits", "retry_failed_judges_in_score"}
@@ -155,10 +154,18 @@ def _line(stage: str, status: str, detail: str) -> None:
     print(f"stage {stage:<13} {status:<6} {detail}", flush=True)
 
 
-def _coverage(harness: dict, run_id: str, key: str) -> str:
-    """'80 judged, 0 judge failed, 0 not judged' for one judge, read from stored scores."""
+def _coverage(harness: dict, run_id: str, judge: str) -> str:
+    """'80 judged, 0 judge failed, 0 not judged' for one judge, read from its stored score rows.
+
+    Only this judge's own rows are read (not report.item_table, which needs all three
+    scorers): right after the faithfulness stage the relevance rows do not exist yet.
+    """
+    loader = (judges.load_judges_config if judge == "faithfulness"
+              else judges.load_relevance_config)
+    version = loader(harness["judges_config"])["version"]
     with closing(store.connect(harness["db_path"])) as conn:
-        counts = Counter(item[key] for item in item_table(conn, run_id, current_versions(harness)))
+        rows = [r for r in store.get_scores(conn, run_id, version) if r["metric"] == judge]
+    counts = Counter(judges._coverage_state(row) for row in rows)
     return (f"{counts['judged']} judged, {counts['judge_failed']} judge failed, "
             f"{counts['not_judged'] + counts['missing']} not judged")
 
@@ -179,12 +186,12 @@ def _stages_after_run(args, harness: dict, auto: dict, run_id: str, *, retry_fai
         return stop("checks", code, "scoring was refused")
     _line("checks", "ok", f"scored run {run_id}")
 
-    for judge, key in (("faithfulness", "faith_state"), ("relevance", "rel_state")):
+    for judge in ("faithfulness", "relevance"):
         argv = [judge, "--run-id", run_id, *hc] + (["--retry-failed"] if retry_failed else [])
         code = judges.main(argv)
         if code != 0:
             return stop(judge, code, f"{judge} judging is incomplete or was refused")
-        _line(judge, "ok", _coverage(harness, run_id, key))
+        _line(judge, "ok", _coverage(harness, run_id, judge))
 
     try:
         versions = {
