@@ -63,6 +63,11 @@ def _add_run(conn, run_id, *, split="dev", status="completed"):
         store.finish_run(conn, run_id, status=status, n_ok=3, n_failed=0, llm_calls_summary={})
 
 
+# The real stage entry points, captured at import time (the `env` fixture replaces them with fakes).
+REAL_MAINS = {"run": runner.run, "checks": checks.main, "faithfulness": judges.main,
+              "relevance": judges.main, "gate": regression.main}
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Fake pipeline world: `.calls` (list of (stage, argv)), `.codes` (exit code per stage),
@@ -275,7 +280,7 @@ def test_run_judge_stages_get_their_subcommand_name(env):
     cli.main(env.argv_run())
     assert env.argv_of("faithfulness")[0] == "faithfulness"
     assert env.argv_of("relevance")[0] == "relevance"
-    assert env.argv_of("gate")[0] == "check"
+    assert "check" in env.argv_of("gate")
 
 
 @pytest.mark.parametrize("stage, code, expected_exit, called", [
@@ -532,4 +537,22 @@ def test_coverage_reads_only_the_named_judges_rows(env):
     assert text == "1 judged, 1 judge failed, 1 not judged"
     # No relevance rows at all: still answers instead of raising.
     assert cli._coverage(env.harness, RUN_ID, "relevance") == "0 judged, 0 judge failed, 0 not judged"
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_stage_argv_is_accepted_by_the_real_stage_parser(env, stage):
+    """Regression (found by the first real run): the argv the pipeline builds must parse in the
+    REAL stage entry point (regression.main wants --harness-config before its subcommand).
+    The tmp harness has no judge / regression blocks, so each real main refuses cleanly
+    (a code, never an argparse SystemExit) before touching any model or the real database."""
+    assert cli.main(env.argv_score(RUN_ID)) == 0 if stage != "run" else cli.main(env.argv_run()) == 0
+    argv = env.argv_of(stage)
+    try:
+        result = REAL_MAINS[stage](argv)
+    except SystemExit as exit_:
+        pytest.fail(f"real {stage} entry point rejected the pipeline's argv {argv}: {exit_}")
+    except OSError:
+        return   # argv parsed; the tmp harness simply points at config files that do not exist
+    code = result[0] if isinstance(result, tuple) else result
+    assert isinstance(code, int)
 

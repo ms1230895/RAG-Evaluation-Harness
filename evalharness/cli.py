@@ -207,7 +207,8 @@ def _stages_after_run(args, harness: dict, auto: dict, run_id: str, *, retry_fai
     if args.no_gate:
         _line("gate", "skip", "gate skipped (--no-gate); no verdict was produced")
         return 0
-    gate_argv = ["check", "--run-id", run_id, *hc]
+    # regression.main takes --harness-config BEFORE its subcommand (unlike the judge stages).
+    gate_argv = [*hc, "check", "--run-id", run_id]
     if args.against:
         gate_argv += ["--against", args.against]
     if args.markdown:
