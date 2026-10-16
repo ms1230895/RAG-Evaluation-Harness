@@ -80,8 +80,8 @@ def intervals_overlap(rates: list[dict]) -> bool   # True when every pair of Wil
 ```
 Rate figures: y-axis fixed to [0, 1] shown as %, error bars from the stored Wilson bounds, `k/n` in hover and under each bar. Metric names reach the figure code only through an allow-list (`TREND_METRICS`), never as free text. Colors: Okabe-Ito palette, one color per metric and per query type, defined once in this file (presentation constants, not experiment values).
 
-### `dashboard/app.py` (new; thin Streamlit layer)
-`streamlit run dashboard/app.py` (localhost). One function per page, wired with `st.navigation`:
+### `dashboard/app.py` and `dashboard/views.py` (new; thin Streamlit layer)
+`streamlit run dashboard/app.py` (localhost). `app.py` only inserts the repo root into `sys.path`, sets the page config and wires the pages with `st.navigation`. The setup, cached reads and one function per page live in `dashboard/views.py` (a split from the first draft: `AppTest.switch_page` cannot reach callable pages, so tests call a page as `views.page_x()`). Pages:
 - `page_trends()`: metric selector (allow-listed); dev runs as points ordered by time, coloured by config name, error bars = 95% Wilson interval; hover shows run_id, config, short git commit, judge versions, `k/n`. Below it, a separate "held-out (Step 12 confirmation)" table (never on the dev chart). A line of text states which scorer versions are shown and lists `excluded` runs with reasons. Caption: points are different configurations and repeats, not one system drifting over time.
 - `page_compare()`: two selectboxes (defaults: newest dev run and the accepted run). Shows the ungrounded rate of both with CI, delta in points, paired improved / regressed / both / unpaired counts, the exact paired p, the faithfulness difference with its bootstrap interval, the noise note, then three tables with a text label (`improved`, `regressed`, `answer changed`), never colour alone. Selecting a row shows both answers side by side with each judge's reasoning. Different split or test set: `st.error` with the refusal text. Same run twice: refused.
 - `page_review_queue()`: run selector (runs that have `reviews` rows), progress line `3 / 9 reviewed`, then one flagged answer at a time: question and type, reference answer, generated answer, flag reasons, retrieved chunks in an expander (`doc_id`, `chunk_id`, score), judge reasoning in a collapsed expander, notes box, **OK** and **Bad** buttons, Previous / Next. A click calls `store.write_review(...)`, clears the data cache and advances to the next unreviewed item.
@@ -131,6 +131,7 @@ The reviewer name is read from the existing `regression.labeler`. `load_dashboar
 - `dashboard/__init__.py` (empty, so tests can import `dashboard.figures`)
 - `dashboard/figures.py`
 - `dashboard/app.py`
+- `dashboard/views.py`
 - `tests/test_15_streamlit_dashboard.py`
 
 ## Files to change
