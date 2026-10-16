@@ -68,6 +68,7 @@ def build_results(conn, harness: dict) -> dict:
     experiments the stored Step 11 rows whose config is NOT the baseline config, in run order
     twin        Step 11 rows of the baseline config itself (an identical rerun, not an experiment)
     heldout     the stored Step 12 confirmation report
+    regression  the stored Step 13 checks (gate verdict and flag rate per pair of runs)
     calibration live Step 9 status of each judge, on the baseline run
     Raises WriteupRefused when the baseline, the experiments or the held-out report is missing.
     """
@@ -93,11 +94,17 @@ def build_results(conn, harness: dict) -> dict:
         raise WriteupRefused("no stored held-out report (python -m evalharness.heldout confirm)")
     heldout = heldout_reports[-1]["report"]
 
+    # Step 13 regression checks: one row per (run, reference run, flag version) as stored.
+    regression = {}
+    for row in store.list_run_reports(conn, "regression"):
+        report = row["report"]
+        regression[(report["run_id"], report["against_run_id"], report["flag_version"])] = report
+
     versions = baseline["metadata"]["versions"]
     calibration = {judge: _calibration_status(conn, base_run_id, judge, versions[judge])
                    for judge in ("faithfulness", "relevance")}
     return {"baseline": baseline, "experiments": experiments, "twin": twin, "heldout": heldout,
-            "calibration": calibration, "accepted": (store.get_accepted_runs(conn, "dev") or [None])[0]}
+            "regression": list(regression.values()), "calibration": calibration, "accepted": (store.get_accepted_runs(conn, "dev") or [None])[0]}
 
 
 # ---------------------------------------------------------------- the block
@@ -159,6 +166,17 @@ def format_results_markdown(results: dict) -> str:
                      f"| {c['improved']} / {c['regressed']} | {_p(row['p_value'])} "
                      f"| {len(row['experiment']['false_refusals'])} |")
 
+    if results["regression"]:
+        lines += ["", "### Regression checks stored (Step 13)", "",
+                  "| Run | Compared with | Gate | Ungrounded change | Flag rate | Flag reasons |",
+                  "|---|---|---|---|---|---|"]
+        for rep in results["regression"]:
+            g = rep["gate"]
+            reasons = ", ".join(f"{k} {v}" for k, v in rep["flag_reason_counts"].items()) or "none"
+            lines.append(f"| `{rep['run_id']}` | `{rep['against_run_id']}` | {g['verdict']} "
+                         f"| {g['delta_points']:+.2f} pts | {_rate(rep['flag_rate'])} | {reasons} |")
+        lines += ["", "The flag rate is review workload, not a quality number: it depends on which two "
+                      "runs are compared (`answer_changed` flags grow with the difference between them)."]
     lines += ["", "### Judge calibration (Step 9)", "", "| Judge | Version | Status |", "|---|---|---|"]
     for judge in ("faithfulness", "relevance"):
         version = base["metadata"]["versions"][judge]
