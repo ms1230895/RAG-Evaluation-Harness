@@ -100,8 +100,10 @@ SCHEMA = (
         run_id       TEXT NOT NULL REFERENCES runs(run_id),
         query_id     TEXT NOT NULL REFERENCES queries(id),
         flag_reasons TEXT,                         -- JSON list
-        human_label  TEXT,                         -- set only by Gaurav
+        human_label  TEXT,                         -- set only by Gaurav ('ok' | 'bad' from the dashboard)
         notes        TEXT,
+        labeler      TEXT,                         -- who gave the label (Step 15); NULL = flag only
+        reviewed_at  TEXT,                         -- UTC ISO time of the label (Step 15)
         PRIMARY KEY (run_id, query_id)
     )""",
     """
@@ -185,10 +187,25 @@ def _migrate_scores(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE scores")
 
 
+def _migrate_reviews(conn: sqlite3.Connection) -> None:
+    """Add the Step 15 columns (labeler, reviewed_at) to a `reviews` table made before them.
+
+    ALTER TABLE ADD COLUMN keeps every stored row; new columns are NULL on old rows.
+    A fresh database already has the columns from SCHEMA, so nothing happens.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+    if not columns:
+        return   # no table yet: SCHEMA creates it with the new columns
+    for column in ("labeler", "reviewed_at"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE reviews ADD COLUMN {column} TEXT")
+
+
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create every table if it does not exist yet (after migrating an old empty scores table)."""
+    """Create every table if it does not exist yet (after migrating older layouts)."""
     with conn:
         _migrate_scores(conn)
+        _migrate_reviews(conn)
         for statement in SCHEMA:
             conn.execute(statement)
 
@@ -282,6 +299,30 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
     """The runs row as a dict, or None if there is no such run."""
     row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
     return dict(row) if row is not None else None
+
+
+def list_runs(conn: sqlite3.Connection, split: str | None = None) -> list[dict]:
+    """Run rows for the dashboard, oldest first (timestamp, then run_id); one split or all."""
+    columns = ("run_id, timestamp, split, status, config_path, git_commit, git_dirty,"
+               " judge_version, n_queries, n_ok, n_failed")
+    if split is None:
+        rows = conn.execute(f"SELECT {columns} FROM runs ORDER BY timestamp, run_id").fetchall()
+    else:
+        rows = conn.execute(f"SELECT {columns} FROM runs WHERE split = ?"
+                            " ORDER BY timestamp, run_id", (split,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def runs_with_versions(conn: sqlite3.Connection, versions: list[str]) -> set[str]:
+    """Run ids that have score rows for EVERY one of the given scorer versions."""
+    wanted = sorted(set(versions))
+    if not wanted:
+        return set()
+    marks = ", ".join("?" for _ in wanted)   # only "?" placeholders go into the SQL text
+    rows = conn.execute(
+        f"SELECT run_id FROM scores WHERE version IN ({marks})"
+        " GROUP BY run_id HAVING COUNT(DISTINCT version) = ?", (*wanted, len(wanted))).fetchall()
+    return {row["run_id"] for row in rows}
 
 
 # ---------------------------------------------------------------- outputs
@@ -541,8 +582,8 @@ def write_flag_rows(conn: sqlite3.Connection, run_id: str, flags: dict[str, list
 def get_flag_rows(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """A run's `reviews` rows ordered by query_id; `flag_reasons` is the parsed JSON list."""
     rows = conn.execute(
-        "SELECT run_id, query_id, flag_reasons, human_label, notes FROM reviews"
-        " WHERE run_id = ? ORDER BY query_id", (run_id,)).fetchall()
+        "SELECT run_id, query_id, flag_reasons, human_label, notes, labeler, reviewed_at"
+        " FROM reviews WHERE run_id = ? ORDER BY query_id", (run_id,)).fetchall()
     out = []
     for row in rows:
         item = dict(row)
@@ -576,3 +617,47 @@ def set_judge_version(conn: sqlite3.Connection, run_id: str, value: str) -> None
     with conn:
         conn.execute("UPDATE runs SET judge_version = ? WHERE run_id = ? AND judge_version IS NULL",
                      (value, run_id))
+
+
+# ---------------------------------------------------------------- dashboard (Step 15)
+
+def get_queries(conn: sqlite3.Connection, query_ids: list[str]) -> dict[str, dict]:
+    """Test-set rows by id: question, type, reference_answer, source_doc_ids (parsed), split.
+
+    Ids that are not stored are simply absent from the result.
+    """
+    ids = sorted(set(query_ids))
+    if not ids:
+        return {}
+    marks = ", ".join("?" for _ in ids)   # only "?" placeholders go into the SQL text
+    rows = conn.execute(
+        "SELECT id, question, type, reference_answer, source_doc_ids, split FROM queries"
+        f" WHERE id IN ({marks})", ids).fetchall()
+    out = {}
+    for row in rows:
+        item = dict(row)
+        item["source_doc_ids"] = json.loads(item["source_doc_ids"])
+        out[item.pop("id")] = item
+    return out
+
+
+def write_review(conn: sqlite3.Connection, run_id: str, query_id: str, human_label: str,
+                 notes: str | None, labeler: str, allowed_labels: list[str]) -> None:
+    """Store one human review on an EXISTING flagged `reviews` row and commit at once.
+
+    Only human_label, notes, labeler and reviewed_at are written; flag_reasons is
+    never touched and no row is created, so a label can only land on an answer the
+    flags selected. `allowed_labels` comes from the dashboard config (ok / bad).
+    """
+    if human_label not in allowed_labels:
+        raise ValueError(f"human_label must be one of {list(allowed_labels)}, got {human_label!r}")
+    if not labeler or not labeler.strip():
+        raise ValueError("a review needs a labeler")
+    with conn:
+        updated = conn.execute(
+            "UPDATE reviews SET human_label = ?, notes = ?, labeler = ?, reviewed_at = ?"
+            " WHERE run_id = ? AND query_id = ?",
+            (human_label, notes, labeler, _now(), run_id, query_id),
+        ).rowcount
+    if updated != 1:
+        raise ValueError(f"no flagged review row for {run_id} / {query_id}")
