@@ -557,3 +557,22 @@ def delete_unlabelled_flag_rows(conn: sqlite3.Connection, run_id: str) -> int:
         cursor = conn.execute("DELETE FROM reviews WHERE run_id = ? AND human_label IS NULL",
                               (run_id,))
     return cursor.rowcount
+
+
+def set_judge_version(conn: sqlite3.Connection, run_id: str, value: str) -> None:
+    """Record the judge versions on a run (Step 14): only while runs.judge_version is NULL.
+
+    The same value again is a no-op; a different value raises ValueError, so a run's
+    recorded judge version can never silently change.
+    """
+    row = conn.execute("SELECT judge_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no run {run_id!r}")
+    if row["judge_version"] is not None:
+        if row["judge_version"] != value:
+            raise ValueError(f"run {run_id} already records judge version "
+                             f"{row['judge_version']!r}, not {value!r}")
+        return
+    with conn:
+        conn.execute("UPDATE runs SET judge_version = ? WHERE run_id = ? AND judge_version IS NULL",
+                     (value, run_id))

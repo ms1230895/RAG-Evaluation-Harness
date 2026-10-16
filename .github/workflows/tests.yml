@@ -1,0 +1,31 @@
+# Runs the OFFLINE test suite on every push and pull request.
+# It does NOT run an evaluation: CI has no Ollama server, no cloud model sign-in and no
+# results database (data/*.sqlite is gitignored). The evaluation and the regression gate
+# run locally with `python -m evalharness run ...`. No secrets are used or needed.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # CPU-only torch first: the default Linux wheel pulls several GB of CUDA libraries.
+      # requirements.txt then finds torch already installed.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -q

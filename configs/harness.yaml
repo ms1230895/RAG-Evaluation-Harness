@@ -69,3 +69,8 @@ regression:
   max_ungrounded_rise_points: 3.0     # gate: FAIL when new - accepted ungrounded rate is more than this, in points
   labeler: gaurav                     # accepted_by value; human labels used by `thresholds` come from this labeler
 
+# Automation (Step 14): `python -m evalharness run | score`. Values approved by Gaurav on 2026-10-16.
+automation:
+  allowed_splits: [dev]               # `run` refuses any other split; held-out has its own Step 12 commands
+  retry_failed_judges_in_score: true  # `score` passes --retry-failed to both judges
+
