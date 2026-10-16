@@ -74,3 +74,11 @@ automation:
   allowed_splits: [dev]               # `run` refuses any other split; held-out has its own Step 12 commands
   retry_failed_judges_in_score: true  # `score` passes --retry-failed to both judges
 
+
+# Dashboard (Step 15): `streamlit run dashboard/app.py`. Starting defaults for Gaurav to approve.
+# The reviewer name for saved reviews is regression.labeler.
+dashboard:
+  cache_ttl_seconds: 60        # how long a cached DB read is reused; cleared after every saved review
+  show_heldout: true           # show the separate, read-only held-out table on the trends page
+  excerpt_chars: 400           # display only: answers / chunks longer than this are expandable
+  review_labels: [ok, bad]     # the only values the review buttons can write

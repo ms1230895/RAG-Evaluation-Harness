@@ -177,7 +177,8 @@ class TestConnect:
                  "llm_calls_json"},
         "outputs": {"run_id", "query_id", "answer", "retrieved_chunks_json", "latency_ms", "error"},
         "scores": {"run_id", "query_id", "metric", "version", "value", "reasoning", "scored_at"},
-        "reviews": {"run_id", "query_id", "flag_reasons", "human_label", "notes"},
+        "reviews": {"run_id", "query_id", "flag_reasons", "human_label", "notes", "labeler",
+                    "reviewed_at"},
     }
 
     def test_connect_new_db_creates_all_five_tables(self, results_db):
